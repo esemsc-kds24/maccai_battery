@@ -1,0 +1,368 @@
+# =============================================================================
+# MACCAI Battery Materials Discovery Pipeline — Configuration
+# =============================================================================
+# This file is the single source of truth for all pipeline parameters.
+# Edit values here instead of touching the code directly.
+#
+# Sections:
+#   project         → paths and naming
+#   generation      → MatterGen settings
+#   relaxation      → MatterSim ML-relaxation settings
+#   screening       → sanity-check thresholds
+#   deduplication   → structure deduplication before DB insertion
+#   dft_screening   → Quantum ESPRESSO SCF settings
+#   dft_relax       → Quantum ESPRESSO ionic relaxation settings
+#   hull            → Materials Project hull analysis settings
+#   database        → candidate record settings
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PROJECT
+# -----------------------------------------------------------------------------
+project:
+  name: "MACCAI-Battery"
+
+  # Root output directory (relative to repo root, or absolute).
+  # All pipeline outputs will be written under this directory.
+  output_dir: "output"
+
+  # Sub-directories (relative to output_dir).
+  # These are created automatically — do not create them manually.
+  dirs:
+    candidates: "candidates"
+    ml_relaxed: "candidates/ml_relaxed"
+    cifs: "candidates/cifs"
+    vasp_inputs: "vasp_inputs"
+    dft_scf: "dft/scf"
+    dft_relax: "dft/relax"
+    logs: "logs"
+
+  # The single-file candidate database (NDJSON, one record per line).
+  candidates_db: "candidates.ndjson"
+
+# -----------------------------------------------------------------------------
+# GENERATION  (MatterGen)
+# -----------------------------------------------------------------------------
+generation:
+  # Chemical system to condition on (dash-separated elements).
+  # This defines the search space for crystal generation.
+  chemical_system: "Li-Fe-P-O"
+
+  # Upper bound on energy above the convex hull (eV/atom).
+  # Lower → more thermodynamically stable, harder to sample.
+  # Recommended range: 0.0 – 0.1
+  energy_above_hull: 0.05
+
+  # MatterGen checkpoint name (must match a checkpoint exposed by
+  # the installed MatterGen version).
+  model_name: "chemical_system_energy_above_hull"
+
+  # Number of structures generated per diffusion batch.
+  batch_size: 8
+
+  # Number of batches to run.
+  # Total structures = batch_size × num_batches
+  num_batches: 8
+
+  # Guidance strength for conditional generation.
+  # Higher values → structures closer to the conditioning target,
+  # but at the cost of diversity.
+  diffusion_guidance_factor: 2.0
+
+  # Apple Silicon MPS fallback (set true on M1/M2/M3 Macs, false on GPU servers).
+  pytorch_mps_fallback: false
+
+# -----------------------------------------------------------------------------
+# ML RELAXATION  (MatterSim via ASE)
+# -----------------------------------------------------------------------------
+relaxation:
+  # Device for MatterSim inference.
+  # Options: "cpu", "cuda", "mps"
+  # Use "cuda" on a GPU machine, "cpu" on Mac/CPU-only servers.
+  device: "cpu"
+
+  # Maximum number of structures to relax from the generated pool.
+  # Set to null to relax all generated structures.
+  max_structures: null
+
+  # ASE BFGS optimizer settings.
+  fmax: 0.05 # Force convergence threshold (eV/Å)
+  max_steps: 300 # Maximum ionic steps per structure
+
+  # Use FrechetCellFilter (allows cell shape + volume to relax).
+  # Set to false to fix the cell and relax atoms only.
+  relax_cell: true
+
+  # Fallback to ASE EMT potential if MatterSim is unavailable.
+  # EMT is much less accurate but allows pipeline testing.
+  emt_fallback: true
+
+# -----------------------------------------------------------------------------
+# STRUCTURAL SANITY CHECKS  (pymatgen)
+# -----------------------------------------------------------------------------
+screening:
+  # Minimum acceptable interatomic distance (Å).
+  # Structures with shorter bonds are likely unphysical.
+  min_distance_threshold_A: 1.0
+
+  # Acceptable density range (g/cm³).
+  # Structures outside this range likely have bad lattices.
+  density_min_gcc: 1.0
+  density_max_gcc: 8.0
+
+  # Whether to attempt oxidation state assignment.
+  # Failures are non-fatal and stored as metadata.
+  assign_oxidation_states: true
+
+  # Whether to check charge neutrality.
+  check_charge_neutrality: true
+
+  # Whether to run bond-valence analysis.
+  check_bond_valence: true
+
+  # Treat failed checks as hard errors (stop pipeline) or soft warnings.
+  # Recommended: false (store failures as metadata, continue pipeline).
+  hard_filter: false
+
+# -----------------------------------------------------------------------------
+# STRUCTURE DEDUPLICATION  (step 3: before database insertion)
+# -----------------------------------------------------------------------------
+# MatterGen can produce duplicate or near-duplicate structures.
+# Deduplication runs before sanity checks to avoid wasting compute on copies.
+deduplication:
+  # Enable deduplication in step 3 (03_sanity_check.py).
+  enabled: true
+
+  # Fingerprinting method.
+  # Options:
+  #   formula_volume_density  — fast: compares formula + cell volume + density
+  #                             (catches obvious duplicates; may miss rotations)
+  #   pymatgen_rdf            — slower but more reliable: uses radial distribution
+  #                             function fingerprint from pymatgen
+  #                             (requires pymatgen >= 2023; slower for large batches)
+  fingerprint_method: "formula_volume_density"
+
+  # Tolerance on cell volume (Å³) used by formula_volume_density.
+  # Two structures with the same formula AND volumes within this window
+  # are considered duplicates.
+  volume_tolerance_A3: 5.0
+
+  # Tolerance on density (g/cm³) used by formula_volume_density.
+  density_tolerance_gcc: 0.05
+
+  # Log a warning when duplicates are removed (true = more verbose).
+  log_removed: true
+
+# -----------------------------------------------------------------------------
+# DFT SCREENING — QE SCF  (Quantum ESPRESSO pw.x)
+# -----------------------------------------------------------------------------
+# K-POINT CONVERGENCE GUIDANCE
+# ─────────────────────────────
+# k-point grids must be converged for reliable energies.  The values below are
+# chosen for the LFP primitive cell (~28 atoms).  If your generated cells are
+# larger or smaller, scale accordingly.
+#
+# Typical convergence ladder for LFP-type structures:
+#
+#   Stage            Grid        Purpose
+#   ─────────────────────────────────────────────────────────────
+#   ML pre-screening  —          No DFT; ML energies only
+#   SCF screening    [2,2,2]    Cheap ranking only; NOT reliable energies
+#   SCF medium       [3,3,3]    Better ranking; still not publication quality
+#   Ionic relaxation [3,3,3]    Structural optimisation (not final energy)
+#   Final static     [4,4,4]    Production-quality energy for hull analysis
+#   Band structure   k-path     Electronic structure (separate calculation)
+#
+# Parallelism: pw.x is CPU-parallel via MPI (not GPU-accelerated by default).
+# On a GPU machine, set dft_screening.nproc to the number of CPU cores.
+#
+# For a publication, run a convergence test:
+#   1. Pick your most stable candidate.
+#   2. Run SCF at [2,2,2], [3,3,3], [4,4,4], [6,6,6].
+#   3. Confirm energies converge to < 1 meV/atom between the last two grids.
+#   4. Use that converged grid for all final calculations.
+#
+# WARNING: The [2,2,2] SCF grid used here is ONLY suitable for screening.
+# Do NOT use these energies directly for hull analysis or publication figures.
+# Always re-run with a converged k-grid for final results.
+# ─────────────────────────────────────────────────────────────────────────────
+
+dft_screening:
+  # Number of ML-relaxed structures to pass to SCF.
+  # These are selected by lowest ML energy per atom.
+  n_candidates: 8
+
+  # Number of MPI processes for pw.x.
+  # Set to the number of available CPU cores on a GPU machine.
+  # Override per-run with: python scripts/04_dft.py --nproc N
+  nproc: 1
+
+  # k-point grid for SCF screening (coarse — for RANKING only, not final energies).
+  # See k-point convergence guidance above.
+  kpoints: [2, 2, 2]
+
+  # Plane-wave kinetic energy cutoff (Ry).
+  # 35 Ry is adequate for screening with USPP pseudopotentials.
+  # For PAW pseudopotentials or final calculations, use ≥ 45 Ry.
+  ecutwfc: 35
+
+  # Charge density cutoff (Ry).
+  # Recommended: 8× ecutwfc for USPP; 4× ecutwfc for PAW/ONCV.
+  ecutrho: 280
+
+  # Exchange-correlation functional (passed implicitly via pseudopotentials).
+  functional: "PBE"
+
+  # Electronic smearing method and width.
+  smearing: "mp" # Methfessel-Paxton (good for metals and marginal insulators)
+  degauss: 0.03 # Smearing width (Ry); 0.01–0.02 for insulators, 0.03–0.05 for metals
+
+  # Self-consistency convergence threshold (Ry).
+  # 1e-4 is fine for screening.  Use 1e-6 or tighter for final energies.
+  conv_thr: 1.0e-4
+
+  # Charge mixing beta (0.1–0.7; lower for magnetic/strongly correlated systems).
+  mixing_beta: 0.3
+
+  # Spin-polarised calculation (required for Fe-containing systems).
+  spin_polarised: true
+
+  # Initial magnetic moments per species.
+  # Keys must match elements in chemical_system.
+  # Fe typically starts at 0.3–0.5 (high spin); adjust if calculation diverges.
+  starting_magnetization:
+    Li: 0.0
+    Fe: 0.3
+    P: 0.0
+    O: 0.0
+
+# -----------------------------------------------------------------------------
+# DFT RELAXATION — QE IONIC RELAX  (Quantum ESPRESSO pw.x)
+# -----------------------------------------------------------------------------
+dft_relax:
+  # Number of SCF-ranked structures to pass to ionic relaxation.
+  n_candidates: 3
+
+  # Number of MPI processes for pw.x.
+  # Set to the number of available CPU cores on a GPU machine.
+  nproc: 1
+
+  # k-point grid for relaxation.
+  # [3,3,3] is a reasonable compromise between cost and accuracy for relaxation.
+  # For final production relaxations, use [4,4,4] or converge explicitly.
+  # See k-point convergence guidance in the dft_screening section above.
+  kpoints: [3, 3, 3]
+
+  # Plane-wave kinetic energy cutoff (Ry).
+  # Slightly higher than SCF to better resolve forces during relaxation.
+  ecutwfc: 45
+
+  # Charge density cutoff (Ry).
+  ecutrho: 360
+
+  # Ionic optimizer.
+  ion_dynamics: "bfgs"
+
+  # Maximum number of ionic steps.
+  # 10 steps is a short relax to remove ML artifacts.
+  # For full structural relaxation, use ≥ 50 steps.
+  nstep: 10
+
+  # Self-consistency convergence threshold (Ry).
+  conv_thr: 1.0e-5
+
+  # Charge mixing beta.
+  mixing_beta: 0.3
+
+  # Spin-polarised calculation.
+  spin_polarised: true
+
+  # Initial magnetic moments per species.
+  # Slightly higher Fe moment than SCF screening for better convergence.
+  starting_magnetization:
+    Li: 0.0
+    Fe: 0.4
+    P: 0.0
+    O: 0.0
+
+# -----------------------------------------------------------------------------
+# PSEUDOPOTENTIALS  (Quantum ESPRESSO / ONCV / USPP / PAW)
+# -----------------------------------------------------------------------------
+pseudopotentials:
+  # Directory containing .UPF pseudopotential files.
+  # Use a path relative to the project root (recommended) or an absolute path.
+  #
+  # To download the default pseudopotentials, run:
+  #   python scripts/download_pseudopotentials.py
+  #
+  # This will populate the pseudo/ directory in the project root.
+  pseudo_dir: "pseudo"
+
+  # Pseudopotential filenames, keyed by element symbol.
+  # All elements in chemical_system MUST have an entry here.
+  # These filenames are downloaded by download_pseudopotentials.py.
+  files:
+    Li: "Li.pbe-s-kjpaw_psl.1.0.0.UPF"
+    Fe: "Fe.pbe-spn-kjpaw_psl.0.2.1.UPF"
+    P: "P.pbe-n-kjpaw_psl.0.1.UPF"
+    O: "O.pbe-n-kjpaw_psl.0.1.UPF"
+
+# -----------------------------------------------------------------------------
+# HULL ANALYSIS  (Materials Project convex hull — Step 5)
+# -----------------------------------------------------------------------------
+hull:
+  # Energy-above-hull threshold for labelling a structure as "stable" (eV/atom).
+  #
+  # Interpretation:
+  #   0.000           → on the convex hull (thermodynamically stable ground state)
+  #   0.000 – 0.050   → likely synthesisable (low-lying metastable)
+  #   0.050 – 0.100   → marginal; may be accessible under special conditions
+  #   > 0.100         → probably too metastable for practical synthesis
+  #
+  # LiFePO4 (olivine) sits at ΔH ≈ 0.000 eV/atom on the Li-Fe-P-O hull.
+  # A threshold of 0.1 eV/atom is standard in the computational materials
+  # literature for "synthesisable" candidates.
+  stability_threshold_eV: 0.1
+
+  # Materials Project API key.
+  # SECURITY: Do NOT paste your key here.
+  # Instead set the environment variable before running step 6:
+  #
+  #   export MP_API_KEY="your_key_here"
+  #
+  # Get your free key at: https://materialsproject.org/api
+  # The key is read automatically from the environment; this field is
+  # intentionally left blank.
+  mp_api_key: ""
+
+  # DFT energy source for hull calculation.
+  # Options:
+  #   relax  → use fully ionic-relaxed DFT energies (recommended, more accurate)
+  #   scf    → use single-point SCF energies (less accurate but available earlier)
+  #
+  # IMPORTANT: The hull comparison is only meaningful if DFT energies were
+  # computed with settings comparable to the Materials Project (PBE, PAW).
+  # Systematic offsets between QE and VASP energies may exist; treat
+  # ΔH_hull values from this pipeline as approximate screening indicators
+  # rather than high-accuracy thermodynamic quantities.
+  energy_source: "relax"
+
+  # Maximum energy above hull to include in reports (eV/atom).
+  # Candidates above this cutoff are shown but flagged as "unstable".
+  report_max_e_above_hull: 0.5
+
+# -----------------------------------------------------------------------------
+# CANDIDATE DATABASE
+# -----------------------------------------------------------------------------
+database:
+  # Generator tag written into every candidate record.
+  generator: "MatterGen"
+
+  # Workflow tag written into dft_jobs.workflow field.
+  # This communicates the intended DFT protocol to downstream consumers.
+  dft_workflow: "PBE_scf_relax_QE"
+
+  # Default VASP INCAR settings stored as metadata (for future use).
+  vasp_incar_defaults:
+    ENCUT: 520
+    KSPACING: 0.3

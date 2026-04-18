@@ -1,0 +1,154 @@
+# =============================================================================
+# MACCAI Battery Pipeline — MatterGen Environment (Step 1)
+# =============================================================================
+# Conda environment for Step 1: Crystal structure generation (MatterGen).
+#
+# This is a SEPARATE environment from the main 'maccai' environment because
+# MatterGen requires specific PyTorch/torchvision versions that conflict with
+# MatterSim's requirements. This is a known upstream constraint.
+#
+# Create with:
+#   conda env create -f environment_mattergen.yml
+#   conda activate mattergen
+#
+# After creating, install MatterGen from source:
+#   git clone https://github.com/microsoft/mattergen.git
+#   cd mattergen
+#   pip install -e . --extra-index-url https://download.pytorch.org/whl/cu118 --no-build-isolation
+#   cd ..
+#
+# Register as a Jupyter kernel (optional):
+#   python -m ipykernel install --user \
+#       --name mattergen \
+#       --display-name "Python (mattergen)"
+#
+# Run Step 1:
+#   conda activate mattergen
+#   python scripts/01_generate.py
+#
+# After Step 1 completes, switch to the main environment:
+#   conda activate maccai
+#   python main.py --from-step 2
+#
+# Notes:
+#   - This environment is ONLY for Step 1 (generation).
+#   - Do NOT install MatterSim here — torch version conflicts will break things.
+#   - Python 3.10 is required by MatterGen's dependencies (hydra-core, etc.).
+#   - torch_cluster/scatter/sparse must be installed from PyG wheels BEFORE
+#     MatterGen, otherwise setup.py cannot import torch during build.
+# =============================================================================
+
+name: mattergen
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # ── Python runtime ────────────────────────────────────────────────────────
+  - python=3.10
+
+  # ── Core scientific stack ─────────────────────────────────────────────────
+  - numpy>=1.24,<2.0
+  - scipy>=1.10
+  - matplotlib>=3.7
+
+  # ── Atomistic tools ───────────────────────────────────────────────────────
+  - conda-forge::ase>=3.22
+
+  # ── Crystal structure analysis ────────────────────────────────────────────
+  - conda-forge::pymatgen>=2023.11
+
+  # ── Data handling ─────────────────────────────────────────────────────────
+  - pandas>=2.0
+  - pyyaml>=6.0
+
+  # ── Jupyter support ───────────────────────────────────────────────────────
+  - jupyter>=1.0
+  - ipykernel>=6.0
+  - ipywidgets>=8.0
+
+  # ── Build tools ───────────────────────────────────────────────────────────
+  - pip
+  - setuptools>=65,<81
+  - wheel
+
+  # ── pip-only packages ─────────────────────────────────────────────────────
+  - pip:
+      # ── PyTorch (must match MatterGen's hard pin: torch==2.2.1+cu118) ─────
+      # These must be installed first so PyG extension builds can find torch.
+      - --extra-index-url https://download.pytorch.org/whl/cu118
+      - torch==2.2.1+cu118
+      - torchvision==0.17.1+cu118
+      - torchaudio==2.2.1+cu118
+
+      # ── PyG extensions — prebuilt wheels, must come BEFORE torch-geometric ─
+      # Installing from source would fail because setup.py imports torch
+      # before torch is available in pip's build isolation environment.
+      - --find-links https://data.pyg.org/whl/torch-2.2.1+cu118.html
+      - torch-cluster
+      - torch-scatter
+      - torch-sparse
+      - torch-spline-conv
+
+      # ── Hydra configuration system ────────────────────────────────────────
+      - pytorch-lightning==2.0.6
+      - hydra-core==1.3.1
+      - hydra-joblib-launcher==1.1.5
+      - omegaconf==2.3.0
+
+      # ── Graph neural network support ──────────────────────────────────────
+      - torch-geometric>=2.5
+
+      # ── Model weights from Hugging Face Hub ───────────────────────────────
+      - huggingface-hub>=0.19
+
+      # ── Experiment tracking (optional but imported by MatterGen) ──────────
+      - wandb>=0.10
+
+      # ── LMDB database (used by MatterGen for dataset storage) ─────────────
+      - lmdb
+
+      # ── Structure fingerprinting utilities ────────────────────────────────
+      - matscipy>=0.7.0
+
+      # ── Oxidation state screening ─────────────────────────────────────────
+      - SMACT
+
+      # ── Testing ───────────────────────────────────────────────────────────
+      - pytest>=7.4
+      - pytest-cov>=4.1
+
+# =============================================================================
+# Post-install steps (run manually after `conda env create`)
+# =============================================================================
+# 1. Activate the environment:
+#      conda activate mattergen
+#
+# 2. Clone and install MatterGen from source:
+#      git clone https://github.com/microsoft/mattergen.git
+#      cd mattergen
+#      pip install -e . \
+#          --extra-index-url https://download.pytorch.org/whl/cu118 \
+#          --no-build-isolation
+#      cd ..
+#
+#    --no-build-isolation is required so that MatterGen's setup.py can
+#    find the already-installed torch (pip's default isolated build
+#    environment would hide it, causing ModuleNotFoundError: torch).
+#
+# 3. Verify installation:
+#      mattergen-generate --help
+#
+# 4. Register as a Jupyter kernel (optional):
+#      python -m ipykernel install --user \
+#          --name mattergen \
+#          --display-name "Python (mattergen)"
+#
+# 5. Run Step 1:
+#      python scripts/01_generate.py
+#
+# 6. After generation completes, switch to the main environment:
+#      conda activate maccai
+#      python main.py --from-step 2
+# =============================================================================

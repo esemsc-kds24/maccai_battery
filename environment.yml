@@ -1,0 +1,152 @@
+# =============================================================================
+# MACCAI Battery Pipeline — Main Environment (Steps 2–6)
+# =============================================================================
+# This is the primary conda environment for the MACCAI pipeline.
+# It covers everything except Step 1 (MatterGen generation), which requires
+# its own environment due to conflicting PyTorch version requirements.
+#
+# Steps covered by this environment:
+#   2. ML relaxation      (MatterSim via ASE)
+#   3. Sanity checks      (pymatgen)
+#   4. DFT calculations   (Quantum ESPRESSO + pymatgen-io-espresso)
+#   5. Merge DFT results  (pymatgen, pandas)
+#   6. Hull analysis      (mp-api, pymatgen)
+#
+# Create with:
+#   conda env create -f environment.yml
+#   conda activate maccai
+#
+# After creating the environment, install MatterSim:
+#   cd /path/to/mattersim && pip install -e .
+#
+# For Quantum ESPRESSO (step 4):
+#   Ubuntu/Debian:  sudo apt-get install quantum-espresso
+#   Conda:          conda install -c conda-forge qe
+#   From source:    https://www.quantum-espresso.org/
+#
+# Install pymatgen-io-espresso (required for step 4):
+#   pip install git+https://github.com/Griffin-Group/pymatgen-io-espresso
+#
+# Register as a Jupyter kernel (optional):
+#   python -m ipykernel install --user --name maccai --display-name "Python (maccai)"
+#
+# Environment variables to set before running:
+#   export MP_API_KEY="your_key_here"   # for step 6 (hull analysis)
+# =============================================================================
+
+name: maccai
+
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # ── Python runtime ───────────────────────────────────────────────────────
+  - python=3.10
+
+  # ── PyTorch with CUDA (GPU) ───────────────────────────────────────────────
+  # CUDA 11.8 (most common on rented GPU machines):
+  - pytorch::pytorch>=2.0,<2.5
+  - pytorch::torchvision
+  - pytorch::torchaudio
+  - pytorch::pytorch-cuda=11.8
+
+  # For CUDA 12.1 (newer drivers), comment above and uncomment:
+  # - pytorch::pytorch>=2.1,<2.3
+  # - pytorch::pytorch-cuda=12.1
+
+  # CPU-only fallback (no GPU, e.g. Mac or CI):
+  # comment out the pytorch-cuda line above and uncomment:
+  # - pytorch::cpuonly
+
+  # ── Core scientific stack ────────────────────────────────────────────────
+  - numpy>=1.24,<2.0
+  - scipy>=1.10
+  - pandas>=2.0
+  - matplotlib>=3.7
+
+  # ── Atomistic simulation (structure I/O, optimisers, calculators) ─────────
+  - conda-forge::ase>=3.22
+
+  # ── Crystal structure analysis ────────────────────────────────────────────
+  - conda-forge::pymatgen>=2023.11
+
+  # ── Materials Project API client (step 6 — hull analysis) ────────────────
+  - conda-forge::mp-api>=0.41
+
+  # ── Configuration & serialisation ────────────────────────────────────────
+  - pyyaml>=6.0
+
+  # ── Data formats ─────────────────────────────────────────────────────────
+  - conda-forge::h5py>=3.8        # HDF5 I/O (used by some pymatgen/ASE paths)
+
+  # ── Jupyter (optional but useful on GPU machines with JupyterHub) ─────────
+  - jupyter>=1.0
+  - ipykernel>=6.0
+  - ipywidgets>=8.0
+  - conda-forge::jupyterlab>=3.6
+
+  # ── Visualisation ─────────────────────────────────────────────────────────
+  - plotly>=5.0
+
+  # ── Build tools (needed for pip install -e . of MatterSim) ───────────────
+  - pip
+  - setuptools>=65
+  - wheel
+
+  # ── pip-only packages ─────────────────────────────────────────────────────
+  - pip:
+      # ── This package (the MACCAI pipeline) ───────────────────────────────
+      - -e .
+
+      # ── MatterSim — install after env creation from your local clone:
+      #      cd /path/to/mattersim && pip install -e .
+      #   OR install directly from GitHub:
+      # - git+https://github.com/microsoft/mattersim.git
+
+      # ── QE input/output — pymatgen-io-espresso ───────────────────────────
+      # Install after env creation:
+      #   pip install git+https://github.com/Griffin-Group/pymatgen-io-espresso
+      #
+      # Uncomment to install automatically (requires internet at env create time):
+      # - git+https://github.com/Griffin-Group/pymatgen-io-espresso
+
+      # ── Testing ──────────────────────────────────────────────────────────
+      - pytest>=7.4
+      - pytest-cov>=4.1
+
+      # ── Code quality (contributors) ───────────────────────────────────────
+      - black>=23.0
+      - ruff>=0.1
+      - mypy>=1.5
+
+# =============================================================================
+# Post-install checklist
+# =============================================================================
+# After running `conda env create -f environment.yml && conda activate maccai`:
+#
+# 1. Install MatterSim:
+#      cd /path/to/mattersim
+#      pip install -e .
+#
+# 2. Install pymatgen-io-espresso:
+#      pip install git+https://github.com/Griffin-Group/pymatgen-io-espresso
+#
+# 3. Install Quantum ESPRESSO (pw.x must be on PATH):
+#      conda install -c conda-forge qe
+#    or:
+#      sudo apt-get install quantum-espresso   # Ubuntu/Debian
+#
+# 4. Download pseudopotentials for the default Li-Fe-P-O chemistry:
+#      python scripts/download_pseudopotentials.py
+#
+# 5. Set your Materials Project API key (for step 6):
+#      export MP_API_KEY="your_key_here"
+#    Add to ~/.bashrc or ~/.bash_profile to persist across sessions.
+#
+# 6. Verify the installation:
+#      python -c "import maccai_battery; print(maccai_battery.__version__)"
+#      python main.py --dry-run
+# =============================================================================

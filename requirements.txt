@@ -1,0 +1,101 @@
+# =============================================================================
+# MACCAI Battery Materials Discovery Pipeline — Python Dependencies
+# =============================================================================
+# Install with:
+#   pip install -r requirements.txt
+#
+# For a full environment setup (recommended), use the conda environment file:
+#   conda env create -f environment.yml
+#   conda activate maccai
+#
+# NOTE: MatterGen (step 1) must be installed in a SEPARATE conda environment
+# due to conflicting PyTorch version requirements. See environment_mattergen.yml.
+#
+# MatterSim (step 2) must be installed from source into the maccai environment:
+#   cd /path/to/mattersim && pip install -e .
+#
+# Quantum ESPRESSO (step 4) must be installed separately as a system package:
+#   Ubuntu/Debian: sudo apt-get install quantum-espresso
+#   Conda:         conda install -c conda-forge qe
+#   From source:   https://www.quantum-espresso.org/
+#
+# pymatgen-io-espresso (step 4 QE input generation) must be installed from source:
+#   pip install git+https://github.com/Griffin-Group/pymatgen-io-espresso
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Core scientific stack
+# ---------------------------------------------------------------------------
+numpy>=1.24,<2.0
+scipy>=1.10
+
+# ---------------------------------------------------------------------------
+# Atomistic simulation environment (structure I/O, relaxation, optimisers)
+# ---------------------------------------------------------------------------
+ase>=3.22
+
+# ---------------------------------------------------------------------------
+# Crystal structure analysis and manipulation
+# ---------------------------------------------------------------------------
+pymatgen>=2023.11
+
+# ---------------------------------------------------------------------------
+# Materials Project API client (step 6 — convex hull analysis)
+# ---------------------------------------------------------------------------
+mp-api>=0.41
+
+# ---------------------------------------------------------------------------
+# Data handling and output
+# ---------------------------------------------------------------------------
+pandas>=2.0
+pyyaml>=6.0
+
+# ---------------------------------------------------------------------------
+# DFT I/O — Quantum ESPRESSO input/output via pymatgen
+# ---------------------------------------------------------------------------
+# Install from source (not on PyPI):
+#   pip install git+https://github.com/Griffin-Group/pymatgen-io-espresso
+#
+# Uncomment the line below ONLY if you are using a PyPI-published release:
+# pymatgen-io-espresso
+
+# ---------------------------------------------------------------------------
+# Visualisation (optional but recommended)
+# ---------------------------------------------------------------------------
+matplotlib>=3.7
+plotly>=5.0
+
+# ---------------------------------------------------------------------------
+# Testing
+# ---------------------------------------------------------------------------
+pytest>=7.4
+pytest-cov>=4.1
+
+# ---------------------------------------------------------------------------
+# Code quality (optional, for contributors)
+# ---------------------------------------------------------------------------
+black>=23.0
+ruff>=0.1
+mypy>=1.5
+
+# ---------------------------------------------------------------------------
+# NOT listed here — install separately:
+#
+#   MatterGen (step 1):
+#     conda env create -f environment_mattergen.yml
+#     conda activate mattergen
+#     git clone https://github.com/microsoft/mattergen.git
+#     cd mattergen && pip install -e .
+#
+#   MatterSim (step 2):
+#     conda activate maccai
+#     cd /path/to/mattersim && pip install -e .
+#
+#   Quantum ESPRESSO (step 4):
+#     conda install -c conda-forge qe
+#     # or: sudo apt-get install quantum-espresso
+#
+#   pymatgen-io-espresso (step 4):
+#     pip install git+https://github.com/Griffin-Group/pymatgen-io-espresso
+# ---------------------------------------------------------------------------

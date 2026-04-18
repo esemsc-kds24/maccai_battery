@@ -1,0 +1,250 @@
+# =============================================================================
+# pyproject.toml — MACCAI Battery Materials Discovery Pipeline
+# =============================================================================
+# Modern Python packaging configuration (PEP 517 / PEP 621).
+# This replaces setup.py for users on pip >= 21.3 / build >= 0.7.
+#
+# Install the package in editable mode:
+#   pip install -e .
+#
+# Install with development extras:
+#   pip install -e ".[dev,viz]"
+# =============================================================================
+
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# -----------------------------------------------------------------------------
+# Package metadata (PEP 621)
+# -----------------------------------------------------------------------------
+[project]
+name = "maccai-battery"
+version = "0.1.0"
+description = "End-to-end ML-to-DFT pipeline for battery materials discovery"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "MACCAI", email = "suoth@maccai.com" },
+]
+keywords = [
+    "materials science",
+    "machine learning",
+    "DFT",
+    "crystal structure",
+    "MatterGen",
+    "MatterSim",
+    "Quantum ESPRESSO",
+    "battery",
+    "convex hull",
+    "pymatgen",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+# Core runtime dependencies (always required)
+dependencies = [
+    "numpy>=1.24,<2.0",
+    "scipy>=1.10",
+    "ase>=3.22",
+    "pymatgen>=2023.11",
+    "pandas>=2.0",
+    "pyyaml>=6.0",
+]
+
+# -----------------------------------------------------------------------------
+# Optional extras
+# -----------------------------------------------------------------------------
+[project.optional-dependencies]
+
+# Materials Project hull analysis (step 6)
+mp = [
+    "mp-api>=0.41",
+]
+
+# Visualisation helpers
+viz = [
+    "matplotlib>=3.7",
+    "plotly>=5.0",
+]
+
+# Jupyter kernel support
+notebook = [
+    "jupyter>=1.0",
+    "ipykernel>=6.0",
+    "ipywidgets>=8.0",
+    "jupyterlab>=3.6",
+]
+
+# Developer tools
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "black>=23.0",
+    "ruff>=0.1",
+    "mypy>=1.5",
+]
+
+# All optional extras (except MatterGen/MatterSim — those need separate envs)
+all = [
+    "mp-api>=0.41",
+    "matplotlib>=3.7",
+    "plotly>=5.0",
+    "jupyter>=1.0",
+    "ipykernel>=6.0",
+    "ipywidgets>=8.0",
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "black>=23.0",
+    "ruff>=0.1",
+    "mypy>=1.5",
+]
+
+# -----------------------------------------------------------------------------
+# Entry points / CLI scripts
+# -----------------------------------------------------------------------------
+[project.scripts]
+# Top-level pipeline orchestrator
+maccai-run = "maccai_battery.main:main"
+
+# Individual pipeline steps (convenience wrappers)
+maccai-generate     = "scripts.generate:main"
+maccai-relax        = "scripts.relax:main"
+maccai-check        = "scripts.sanity_check:main"
+maccai-dft          = "scripts.dft:main"
+maccai-merge        = "scripts.merge_dft_results:main"
+maccai-hull         = "scripts.hull_analysis:main"
+maccai-pseudos      = "scripts.download_pseudopotentials:main"
+
+# -----------------------------------------------------------------------------
+# Package discovery
+# -----------------------------------------------------------------------------
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["maccai_battery*"]
+exclude = ["tests*", "scripts*"]
+
+# -----------------------------------------------------------------------------
+# Black — code formatter
+# -----------------------------------------------------------------------------
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | \.conda
+  | build
+  | dist
+  | output
+  | __pycache__
+)/
+'''
+
+# -----------------------------------------------------------------------------
+# Ruff — fast linter (replaces flake8 + isort + pyupgrade)
+# -----------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [
+    ".git",
+    ".venv",
+    ".conda",
+    "build",
+    "dist",
+    "output",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501",  # line-length — handled by Black
+    "B008",  # do not perform function calls in argument defaults (used in dataclasses)
+    "SIM118",# use `key in dict` rather than `key in dict.keys()` (stylistic)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["maccai_battery"]
+
+# -----------------------------------------------------------------------------
+# MyPy — static type checker
+# -----------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true      # many science libs have no stubs
+disallow_untyped_defs = false      # too strict for scientific code
+pretty = true
+show_error_codes = true
+exclude = [
+    "build/",
+    "dist/",
+    "output/",
+    "scripts/",   # scripts are not typed strictly
+]
+
+# -----------------------------------------------------------------------------
+# Pytest — test runner
+# -----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--tb=short",
+    "-v",
+]
+markers = [
+    "slow: marks tests as slow (deselect with -m 'not slow')",
+    "integration: marks tests that require external tools (QE, MP API, etc.)",
+    "gpu: marks tests that require a CUDA-capable GPU",
+]
+
+# -----------------------------------------------------------------------------
+# Coverage — test coverage reporting
+# -----------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["maccai_battery"]
+omit = [
+    "tests/*",
+    "scripts/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "\\.\\.\\.",
+]
