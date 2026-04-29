@@ -11,16 +11,6 @@
 # dependency is pymatgen-io-espresso, which is imported lazily so that the
 # rest of the package remains importable even if that library is absent.
 #
-# Notebook fidelity
-# -----------------
-# This module is a production port of the QE input-generation cells in
-# (on_gcolab)MACCAI_DFT.ipynb.  Key differences from the notebook:
-#   - Pseudopotential filenames come from cfg.pseudopotentials (fixing the
-#     missing-P-pseudopotential bug in the notebook's PSEUDOS dict).
-#   - nstep is placed in the CONTROL namelist (correct for QE 6.x+).
-#   - run_type-specific settings come from DFTScreeningConfig / DFTRelaxConfig.
-#   - No Google Drive paths or Colab-specific code.
-#
 # Usage
 # -----
 #   from maccai_battery.dft.input_generator import make_scf_input, write_qe_input
@@ -57,20 +47,6 @@ _ESPRESSO_INSTALL_MSG = (
 
 
 def _import_pwin_classes():
-    """Lazily import all PWin classes from pymatgen-io-espresso.
-
-    Returns
-    -------
-    tuple
-        (PWin, ControlNamelist, SystemNamelist, ElectronsNamelist,
-         IonsNamelist, AtomicSpeciesCard, AtomicPositionsCard,
-         CellParametersCard, KPointsCard)
-
-    Raises
-    ------
-    ImportError
-        If pymatgen-io-espresso is not installed.
-    """
     try:
         from pymatgen.io.espresso.inputs.pwin import (  # type: ignore[import]
             AtomicPositionsCard,
@@ -99,21 +75,6 @@ def _import_pwin_classes():
 
 
 def _resolve_pseudo_dir(cfg: "PipelineConfig") -> Path:
-    """Return the absolute pseudopotential directory path.
-
-    If ``cfg.pseudopotentials.pseudo_dir`` is a relative path it is resolved
-    relative to the project config root (i.e. the directory that contains
-    ``config.yaml``).
-
-    Parameters
-    ----------
-    cfg : PipelineConfig
-
-    Returns
-    -------
-    Path
-        Absolute path to the pseudopotential directory.
-    """
     pseudo_dir = Path(cfg.pseudopotentials.pseudo_dir)
     if not pseudo_dir.is_absolute():
         pseudo_dir = cfg.project._root / pseudo_dir
@@ -121,20 +82,6 @@ def _resolve_pseudo_dir(cfg: "PipelineConfig") -> Path:
 
 
 def _ordered_species(structure: "Structure") -> list[str]:
-    """Return the unique element symbols in their first-occurrence order.
-
-    The ordering matches the species indices used in the QE input
-    (1-indexed Fortran style for starting_magnetization etc.).
-
-    Parameters
-    ----------
-    structure : pymatgen.core.Structure
-
-    Returns
-    -------
-    list of str
-        e.g. ["Li", "Fe", "P", "O"]
-    """
     seen: set[str] = set()
     order: list[str] = []
     for site in structure:
@@ -145,6 +92,63 @@ def _ordered_species(structure: "Structure") -> list[str]:
     return order
 
 
+# ---------------------------------------------------------------------------
+# FIX: safe helper that reads a config value from either a Pydantic object
+#      or a plain dict — avoids AttributeError / .get()-on-object crashes.
+# ---------------------------------------------------------------------------
+def _cfg_get(obj, key, default=None):
+    """Read key from a Pydantic model or a dict, returning default if absent."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+# ---------------------------------------------------------------------------
+# FIX: centralised DFT+U writer — used by both make_scf_input and
+#      make_relax_input.  hub_cfg must come from the correct sub-section:
+#        SCF   → cfg.dft_screening.hubbard_u
+#        Relax → cfg.dft_relax.hubbard_u
+# ---------------------------------------------------------------------------
+def _apply_hubbard_u(system, hub_cfg, species_order: list[str]) -> None:
+    """Write lda_plus_u / Hubbard_U entries into a SystemNamelist.
+
+    Parameters
+    ----------
+    system : SystemNamelist
+        The system namelist object to mutate.
+    hub_cfg : object | dict | None
+        The hubbard_u config section (cfg.dft_screening.hubbard_u or
+        cfg.dft_relax.hubbard_u).  May be a Pydantic model or a dict.
+    species_order : list of str
+        Element symbols in the same order as ATOMIC_SPECIES (1-indexed).
+    """
+    if not _cfg_get(hub_cfg, "enabled", False):
+        return
+
+    system["lda_plus_u"] = True
+    system["lda_plus_u_kind"] = _cfg_get(hub_cfg, "lda_plus_u_kind", 0)
+
+    u_map = _cfg_get(hub_cfg, "U", {}) or {}
+    for idx, sym in enumerate(species_order, start=1):
+        # u_map may be a Pydantic model or a plain dict
+        if isinstance(u_map, dict):
+            u_val = u_map.get(sym, 0.0)
+        else:
+            u_val = getattr(u_map, sym, 0.0)
+        system[f"Hubbard_U({idx})"] = u_val
+        logger.debug("  Hubbard_U(%d) = %.2f  [%s]", idx, u_val, sym)
+
+    logger.info(
+        "DFT+U applied: lda_plus_u_kind=%d  U=%s",
+        _cfg_get(hub_cfg, "lda_plus_u_kind", 0),
+        {sym: (_cfg_get(u_map, sym, 0.0) if not isinstance(u_map, dict)
+               else u_map.get(sym, 0.0))
+         for sym in species_order},
+    )
+
+
 def _build_system_namelist(
     SystemNamelist,
     nat: int,
@@ -153,45 +157,11 @@ def _build_system_namelist(
     ecutrho: float,
     smearing: str,
     degauss: float,
-    conv_thr: float,
     spin_polarised: bool,
     species_order: list[str],
     starting_magnetization: dict[str, float],
 ):
-    """Construct a SystemNamelist with optional spin-polarisation parameters.
-
-    ``starting_magnetization(i)`` entries are set via item assignment after
-    construction because Python keyword arguments cannot contain parentheses.
-
-    Parameters
-    ----------
-    SystemNamelist : class
-        The SystemNamelist class from pymatgen-io-espresso.
-    nat : int
-        Number of atoms in the cell.
-    ntyp : int
-        Number of distinct species.
-    ecutwfc : float
-        Plane-wave kinetic energy cut-off (Ry).
-    ecutrho : float
-        Charge-density cut-off (Ry).
-    smearing : str
-        Smearing type (e.g. ``"mp"``).
-    degauss : float
-        Smearing width (Ry).
-    conv_thr : float
-        SCF convergence threshold (Ry).
-    spin_polarised : bool
-        Whether to activate spin-polarised (``nspin=2``) calculation.
-    species_order : list of str
-        Unique element symbols in structure order (determines Fortran indices).
-    starting_magnetization : dict
-        Mapping from element symbol to initial magnetic moment.
-
-    Returns
-    -------
-    SystemNamelist
-    """
+    """Construct a SystemNamelist with optional spin-polarisation parameters."""
     kwargs: dict = dict(
         ibrav=0,
         nat=nat,
@@ -207,8 +177,6 @@ def _build_system_namelist(
 
     system_nl = SystemNamelist(**kwargs)
 
-    # Fortran-indexed starting_magnetization(i): must be set via __setitem__
-    # because Python does not allow parentheses in keyword argument names.
     if spin_polarised:
         for i, el in enumerate(species_order, start=1):
             mag = starting_magnetization.get(el, 0.0)
@@ -231,80 +199,28 @@ def _build_cards(
     cfg: "PipelineConfig",
     kpoints: list[int],
 ) -> "OrderedDict":
-    """Build the four QE cards needed for a pw.x input.
-
-    Parameters
-    ----------
-    AtomicSpeciesCard, AtomicPositionsCard, CellParametersCard, KPointsCard :
-        Card classes from pymatgen-io-espresso.
-    structure : pymatgen.core.Structure
-    species_order : list of str
-        Unique element symbols in first-occurrence order.
-    pseudo_dir : Path
-        Resolved absolute path to the pseudopotential directory (unused here
-        but kept for logging / validation convenience).
-    cfg : PipelineConfig
-        Used to look up pseudopotential filenames via
-        ``cfg.pseudopotentials.get(element)``.
-    kpoints : list of int
-        Three-element k-point mesh [k1, k2, k3].
-
-    Returns
-    -------
-    collections.OrderedDict
-        Keys: ``"atomic_species"``, ``"atomic_positions"``,
-              ``"k_points"``, ``"cell_parameters"``.
-    """
+    """Build the four QE cards needed for a pw.x input."""
     from pymatgen.core import Element  # type: ignore[import]
 
-    # ---- ATOMIC_SPECIES ----
     masses = [float(Element(el).atomic_mass) for el in species_order]
     pseudos = [cfg.pseudopotentials.get(el) for el in species_order]
-    atomic_species = AtomicSpeciesCard(
-        None,
-        species_order,
-        masses,
-        pseudos,
-    )
-    logger.debug(
-        "ATOMIC_SPECIES: %s",
-        list(zip(species_order, pseudos)),
-    )
+    atomic_species = AtomicSpeciesCard(None, species_order, masses, pseudos)
+    logger.debug("ATOMIC_SPECIES: %s", list(zip(species_order, pseudos)))
 
-    # ---- ATOMIC_POSITIONS crystal (fractional) ----
     pos_symbols = [str(site.specie) for site in structure]
     pos_coords = np.array([site.frac_coords for site in structure])
-    atomic_positions = AtomicPositionsCard(
-        "crystal",
-        pos_symbols,
-        pos_coords,
-        None,
-    )
+    atomic_positions = AtomicPositionsCard("crystal", pos_symbols, pos_coords, None)
 
-    # ---- CELL_PARAMETERS angstrom ----
-    lat = structure.lattice.matrix          # 3×3 ndarray, rows = a1, a2, a3
-    cell_parameters = CellParametersCard(
-        "angstrom",
-        lat[0],
-        lat[1],
-        lat[2],
-    )
+    lat = structure.lattice.matrix
+    cell_parameters = CellParametersCard("angstrom", lat[0], lat[1], lat[2])
 
-    # ---- K_POINTS automatic ----
-    k_points = KPointsCard(
-        "automatic",
-        list(kpoints),
-        [0, 0, 0],
-        [],
-        [],
-        [],
-    )
+    k_points = KPointsCard("automatic", list(kpoints), [0, 0, 0], [], [], [])
 
     return OrderedDict([
-        ("atomic_species",    atomic_species),
-        ("atomic_positions",  atomic_positions),
-        ("k_points",          k_points),
-        ("cell_parameters",   cell_parameters),
+        ("atomic_species",   atomic_species),
+        ("atomic_positions", atomic_positions),
+        ("k_points",         k_points),
+        ("cell_parameters",  cell_parameters),
     ])
 
 
@@ -316,41 +232,7 @@ def make_scf_input(
     structure: "Structure",
     cfg: "PipelineConfig",
 ) -> "PWin":
-    """Generate a QE SCF (single-point) input object from a pymatgen Structure.
-
-    Settings are drawn exclusively from ``cfg.dft_screening``
-    (DFTScreeningConfig) and ``cfg.pseudopotentials``
-    (PseudopotentialsConfig).
-
-    Parameters
-    ----------
-    structure : pymatgen.core.Structure
-        The crystal structure to compute the SCF energy for.
-    cfg : PipelineConfig
-        Fully loaded and validated pipeline configuration.
-
-    Returns
-    -------
-    PWin
-        A pymatgen-io-espresso ``PWin`` object ready to be written to disk
-        via :func:`write_qe_input`.
-
-    Raises
-    ------
-    ImportError
-        If ``pymatgen-io-espresso`` is not installed.
-    KeyError
-        If a pseudopotential is missing for any element in the structure
-        (raised by ``cfg.pseudopotentials.get``).
-
-    Notes
-    -----
-    * ``outdir`` is set to ``"./out"`` (relative to the run directory).
-    * ``tprnfor=True`` and ``tstress=True`` are always enabled so that
-      forces and stress are written even for SCF runs.
-    * The ``nspin=2`` and ``starting_magnetization(i)`` entries are only
-      written when ``cfg.dft_screening.spin_polarised`` is ``True``.
-    """
+    """Generate a QE SCF (single-point) input object from a pymatgen Structure."""
     (
         PWin, ControlNamelist, SystemNamelist,
         ElectronsNamelist, _IonsNamelist,
@@ -361,17 +243,12 @@ def make_scf_input(
     scr = cfg.dft_screening
     pseudo_dir = _resolve_pseudo_dir(cfg)
     species_order = _ordered_species(structure)
-
     nat  = len(structure)
     ntyp = len(species_order)
 
     logger.debug(
         "make_scf_input: formula=%s  nat=%d  ntyp=%d  kpts=%s  ecutwfc=%.1f",
-        structure.composition.reduced_formula,
-        nat,
-        ntyp,
-        scr.kpoints,
-        scr.ecutwfc,
+        structure.composition.reduced_formula, nat, ntyp, scr.kpoints, scr.ecutwfc,
     )
 
     # ---- CONTROL ----
@@ -392,48 +269,43 @@ def make_scf_input(
         ntyp=ntyp,
         ecutwfc=scr.ecutwfc,
         ecutrho=scr.ecutrho,
-        smearing=scr.smearing,
+        smearing=scr.smearing,          # from config — mv @ 0.01 Ry
         degauss=scr.degauss,
-        conv_thr=scr.conv_thr,
         spin_polarised=scr.spin_polarised,
         species_order=species_order,
         starting_magnetization=scr.starting_magnetization,
     )
 
-    # ---- ELECTRONS ----
+    # ---- DFT+U (FIXED: read from cfg.dft_screening, not cfg) ----
+    _apply_hubbard_u(
+        system,
+        hub_cfg=getattr(cfg.dft_screening, "hubbard_u", None),
+        species_order=species_order,
+    )
+
+    # ---- ELECTRONS (FIXED: mixing_mode + nmix added) ----
     electrons = ElectronsNamelist(
         conv_thr=scr.conv_thr,
         mixing_beta=scr.mixing_beta,
+        mixing_mode=getattr(scr, "mixing_mode", "plain"),
+        nmix=getattr(scr, "nmix", 8),
     )
 
     # ---- Cards ----
     cards = _build_cards(
-        AtomicSpeciesCard,
-        AtomicPositionsCard,
-        CellParametersCard,
-        KPointsCard,
-        structure=structure,
-        species_order=species_order,
-        pseudo_dir=pseudo_dir,
-        cfg=cfg,
-        kpoints=scr.kpoints,
+        AtomicSpeciesCard, AtomicPositionsCard, CellParametersCard, KPointsCard,
+        structure=structure, species_order=species_order,
+        pseudo_dir=pseudo_dir, cfg=cfg, kpoints=scr.kpoints,
     )
 
     pw_in = PWin(
-        namelists={
-            "control":   control,
-            "system":    system,
-            "electrons": electrons,
-        },
+        namelists={"control": control, "system": system, "electrons": electrons},
         cards=cards,
     )
 
     logger.info(
         "Generated SCF input for %s (%d atoms, %d species, kpts=%s)",
-        structure.composition.reduced_formula,
-        nat,
-        ntyp,
-        scr.kpoints,
+        structure.composition.reduced_formula, nat, ntyp, scr.kpoints,
     )
     return pw_in
 
@@ -443,46 +315,7 @@ def make_relax_input(
     cfg: "PipelineConfig",
     run_dir: Path,
 ) -> "PWin":
-    """Generate a QE ionic-relaxation input object from a pymatgen Structure.
-
-    Settings are drawn from ``cfg.dft_relax`` (DFTRelaxConfig) and
-    ``cfg.pseudopotentials`` (PseudopotentialsConfig).
-
-    Parameters
-    ----------
-    structure : pymatgen.core.Structure
-        The crystal structure to relax.
-    cfg : PipelineConfig
-        Fully loaded and validated pipeline configuration.
-    run_dir : Path
-        Absolute path to the directory where this QE job will be run.
-        Used to set ``outdir`` in the CONTROL namelist so that QE writes
-        its scratch data and XML output to ``<run_dir>/out/``.
-
-    Returns
-    -------
-    PWin
-        A pymatgen-io-espresso ``PWin`` object ready to be written to disk
-        via :func:`write_qe_input`.
-
-    Raises
-    ------
-    ImportError
-        If ``pymatgen-io-espresso`` is not installed.
-    KeyError
-        If a pseudopotential is missing for any element in the structure.
-
-    Notes
-    -----
-    * ``nstep`` is placed in the CONTROL namelist (not IONS) as required by
-      QE 6.x.  Earlier conventions placed it in IONS or SYSTEM, but CONTROL
-      is the correct and portable location for QE ≥ 6.0.
-    * ``outdir`` is set to the absolute path ``<run_dir>/out`` so that QE
-      writes its XML output in a known location regardless of the working
-      directory.
-    * The IONS namelist only contains ``ion_dynamics``; all convergence
-      parameters are controlled by the ELECTRONS and CONTROL namelists.
-    """
+    """Generate a QE ionic-relaxation input object from a pymatgen Structure."""
     (
         PWin, ControlNamelist, SystemNamelist,
         ElectronsNamelist, IonsNamelist,
@@ -494,24 +327,17 @@ def make_relax_input(
     pseudo_dir = _resolve_pseudo_dir(cfg)
     species_order = _ordered_species(structure)
     run_dir = Path(run_dir)
-
     nat  = len(structure)
     ntyp = len(species_order)
 
     logger.debug(
         "make_relax_input: formula=%s  nat=%d  ntyp=%d  kpts=%s"
         "  ecutwfc=%.1f  nstep=%d  ion_dyn=%s",
-        structure.composition.reduced_formula,
-        nat,
-        ntyp,
-        relax.kpoints,
-        relax.ecutwfc,
-        relax.nstep,
-        relax.ion_dynamics,
+        structure.composition.reduced_formula, nat, ntyp,
+        relax.kpoints, relax.ecutwfc, relax.nstep, relax.ion_dynamics,
     )
 
     # ---- CONTROL ----
-    # nstep goes here for QE 6.x (not in IONS or SYSTEM).
     control = ControlNamelist(
         calculation="relax",
         prefix="relax",
@@ -523,43 +349,43 @@ def make_relax_input(
         nstep=relax.nstep,
     )
 
-    # ---- SYSTEM ----
+    # ---- SYSTEM (FIXED: smearing and degauss read from config, not hardcoded) ----
     system = _build_system_namelist(
         SystemNamelist,
         nat=nat,
         ntyp=ntyp,
         ecutwfc=relax.ecutwfc,
         ecutrho=relax.ecutrho,
-        smearing="mp",          # always Methfessel-Paxton for metallic ions
-        degauss=0.03,           # sensible default; relax config does not expose this
-        conv_thr=relax.conv_thr,
+        smearing=relax.smearing,        # FIXED: was hardcoded "mp"
+        degauss=relax.degauss,          # FIXED: was hardcoded 0.03
         spin_polarised=relax.spin_polarised,
         species_order=species_order,
         starting_magnetization=relax.starting_magnetization,
     )
 
-    # ---- ELECTRONS ----
+    # ---- DFT+U (FIXED: read from cfg.dft_relax, not cfg) ----
+    _apply_hubbard_u(
+        system,
+        hub_cfg=getattr(cfg.dft_relax, "hubbard_u", None),
+        species_order=species_order,
+    )
+
+    # ---- ELECTRONS (FIXED: mixing_mode + nmix added) ----
     electrons = ElectronsNamelist(
         conv_thr=relax.conv_thr,
         mixing_beta=relax.mixing_beta,
+        mixing_mode=getattr(relax, "mixing_mode", "plain"),
+        nmix=getattr(relax, "nmix", 8),
     )
 
     # ---- IONS ----
-    ions = IonsNamelist(
-        ion_dynamics=relax.ion_dynamics,
-    )
+    ions = IonsNamelist(ion_dynamics=relax.ion_dynamics)
 
     # ---- Cards ----
     cards = _build_cards(
-        AtomicSpeciesCard,
-        AtomicPositionsCard,
-        CellParametersCard,
-        KPointsCard,
-        structure=structure,
-        species_order=species_order,
-        pseudo_dir=pseudo_dir,
-        cfg=cfg,
-        kpoints=relax.kpoints,
+        AtomicSpeciesCard, AtomicPositionsCard, CellParametersCard, KPointsCard,
+        structure=structure, species_order=species_order,
+        pseudo_dir=pseudo_dir, cfg=cfg, kpoints=relax.kpoints,
     )
 
     pw_in = PWin(
@@ -574,37 +400,13 @@ def make_relax_input(
 
     logger.info(
         "Generated relax input for %s (%d atoms, %d species, kpts=%s, nstep=%d)",
-        structure.composition.reduced_formula,
-        nat,
-        ntyp,
-        relax.kpoints,
-        relax.nstep,
+        structure.composition.reduced_formula, nat, ntyp, relax.kpoints, relax.nstep,
     )
     return pw_in
 
 
 def write_qe_input(pw_in: "PWin", path: Path) -> None:
-    """Write a PWin object to a QE input file.
-
-    Creates all intermediate parent directories if they do not exist.
-
-    Parameters
-    ----------
-    pw_in : PWin
-        A fully constructed QE pw.x input object.
-    path : Path
-        Destination file path (conventionally ``<run_dir>/qe.in``).
-
-    Raises
-    ------
-    OSError
-        If the file cannot be written (e.g. permission error).
-
-    Examples
-    --------
-    >>> from pathlib import Path
-    >>> write_qe_input(pw_in, Path("output/dft/scf/scf_0/qe.in"))
-    """
+    """Write a PWin object to a QE input file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     pw_in.to_file(path)

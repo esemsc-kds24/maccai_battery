@@ -205,7 +205,7 @@ class HullAnalyzer:
         logger.info("Fetching MP reference data for elements: %s", elements)
 
         # Build the phase diagram from MP data
-        phase_diagram = self._build_phase_diagram(elements)
+        phase_diagram, compat = self._build_phase_diagram(elements)
         logger.info(
             "Phase diagram built with %d entries.",
             len(phase_diagram.all_entries),
@@ -214,7 +214,7 @@ class HullAnalyzer:
         # Evaluate every candidate
         results: List[HullResult] = []
         for rec, e_pa in with_energy:
-            result = self._evaluate_candidate(rec, e_pa, phase_diagram)
+            result = self._evaluate_candidate(rec, e_pa, phase_diagram, compat)
             results.append(result)
             if result.success:
                 logger.info("  %s", result.summary_line())
@@ -320,15 +320,13 @@ class HullAnalyzer:
         """
         from mp_api.client import MPRester  # type: ignore[import]
         from pymatgen.analysis.phase_diagram import PhaseDiagram
+        from pymatgen.entries.compatibility import MaterialsProject2020Compatibility
 
         with MPRester(self._api_key) as mpr:
-            # Fetch all stable + near-hull entries for the element set.
-            # ``energy_above_hull`` ≤ 0.05 eV is a generous envelope that
-            # captures all relevant competing phases.
-            entries = mpr.get_entries_in_chemsys(
-                elements=elements,
-                additional_criteria={"energy_above_hull": (0, 0.05)},
-            )
+            # Fetch ALL entries in the chemsys — no energy_above_hull filter.
+            # Filtering to (0, 0.05) can silently drop phases that anchor the
+            # hull at intermediate compositions, making hull distances wrong.
+            entries = mpr.get_entries_in_chemsys(elements=elements)
 
         if not entries:
             raise RuntimeError(
@@ -336,14 +334,33 @@ class HullAnalyzer:
                 f"Check your API key and chemical system spelling."
             )
 
-        logger.debug("Fetched %d MP entries.", len(entries))
-        return PhaseDiagram(entries)
+        logger.debug("Fetched %d raw MP entries.", len(entries))
+
+        # Apply the standard MP2020 compatibility scheme to the reference data.
+        # This ensures the MP entries are on a consistent energy scale
+        # (oxide/peroxide corrections, GGA+U corrections for d-electron systems).
+        compat = MaterialsProject2020Compatibility()
+        entries_corrected = compat.process_entries(entries, clean=True)
+
+        if not entries_corrected:
+            raise RuntimeError(
+                "All MP entries were rejected by MaterialsProject2020Compatibility. "
+                "This usually means the entries are missing required parameters. "
+                "Try fetching with compatible_only=True in MPRester."
+            )
+
+        logger.debug(
+            "%d / %d MP entries survived compatibility processing.",
+            len(entries_corrected), len(entries),
+        )
+        return PhaseDiagram(entries_corrected), compat
 
     def _evaluate_candidate(
         self,
         record: Dict[str, Any],
         e_pa: float,
         phase_diagram,
+        compat,
     ) -> HullResult:
         """Compute the hull distance for a single candidate.
 
@@ -354,13 +371,17 @@ class HullAnalyzer:
         e_pa : float
             DFT energy per atom (eV/atom).
         phase_diagram : pymatgen.analysis.phase_diagram.PhaseDiagram
+            Phase diagram built from corrected MP reference entries.
+        compat : MaterialsProject2020Compatibility
+            Same instance used to process the MP reference entries — must be
+            applied to the candidate entry so both are on the same energy scale.
 
         Returns
         -------
         HullResult
         """
         from pymatgen.core import Composition
-        from pymatgen.analysis.phase_diagram import PDEntry
+        from pymatgen.entries.computed_entries import ComputedEntry
 
         cid     = record.get("id", "unknown")
         formula = record.get("formula", "unknown")
@@ -373,12 +394,43 @@ class HullAnalyzer:
         )
 
         try:
-            comp   = Composition(formula)
+            comp    = Composition(formula)
             n_atoms = int(sum(comp.values()))
             e_total = e_pa * n_atoms
 
-            # Build a PDEntry from the candidate's DFT energy
-            entry = PDEntry(composition=comp, energy=e_total, name=cid)
+            # Read U values from config so hubbards stay in sync with QE settings.
+            hub_cfg = getattr(getattr(self._cfg, "dft_relax", None), "hubbard_u", None)
+            u_vals  = dict(getattr(hub_cfg, "U", {}) or {}) if hub_cfg else {}
+
+            # Build a ComputedEntry (not PDEntry) so compat can apply the same
+            # oxide/GGA+U energy corrections that were applied to the MP reference
+            # entries. Without this the candidate and references are on different
+            # energy scales and every ΔH_hull value is wrong.
+            raw_entry = ComputedEntry(
+                composition=comp,
+                energy=e_total,
+                entry_id=cid,
+                parameters={
+                    "run_type":    "GGA+U" if u_vals else "GGA",
+                    "is_hubbard":  bool(u_vals),
+                    "hubbards":    u_vals,
+                    # Approximate POTCAR spec needed for the oxide correction.
+                    # The hash field is not checked by MaterialsProject2020Compatibility.
+                    "potcar_spec": [
+                        {"titel": f"PAW_PBE {el} ", "hash": None}
+                        for el in sorted(comp.as_dict().keys())
+                    ],
+                },
+            )
+
+            corrected = compat.process_entries([raw_entry], clean=True)
+            if not corrected:
+                raise ValueError(
+                    f"ComputedEntry for {formula} was rejected by "
+                    "MaterialsProject2020Compatibility. Check that hubbards "
+                    "and run_type match what the compat scheme expects."
+                )
+            entry = corrected[0]
 
             # pymatgen PhaseDiagram.get_e_above_hull returns eV/atom
             e_hull = phase_diagram.get_e_above_hull(entry)
