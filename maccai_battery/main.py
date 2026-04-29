@@ -70,37 +70,37 @@ STEPS = {
     1: {
         "name": "generate",
         "label": "Crystal generation (MatterGen)",
-        "script": "scripts/01_generate.py",
+        "script": "scripts/0generate.py",
         "env_note": "Requires: conda activate mattergen",
     },
     2: {
         "name": "relax",
         "label": "ML relaxation (MatterSim)",
-        "script": "scripts/02_relax.py",
+        "script": "scripts/relax.py",
         "env_note": "Requires: conda activate maccai",
     },
     3: {
         "name": "sanity_check",
         "label": "Sanity checks & candidate database",
-        "script": "scripts/03_sanity_check.py",
+        "script": "scripts/sanity_check.py",
         "env_note": "Requires: conda activate maccai",
     },
     4: {
         "name": "dft",
         "label": "DFT screening & relaxation (Quantum ESPRESSO)",
-        "script": "scripts/04_dft.py",
+        "script": "scripts/dft.py",
         "env_note": "Requires: conda activate maccai + pw.x on PATH",
     },
     5: {
         "name": "merge",
         "label": "Merge DFT results",
-        "script": "scripts/05_merge_dft_results.py",
+        "script": "scripts/merge_dft_results.py",
         "env_note": "Requires: conda activate maccai",
     },
     6: {
         "name": "hull",
         "label": "Hull stability analysis (Materials Project)",
-        "script": "scripts/06_hull_analysis.py",
+        "script": "scripts/hull_analysis.py",
         "env_note": "Requires: conda activate maccai + MP_API_KEY set",
     },
 }
