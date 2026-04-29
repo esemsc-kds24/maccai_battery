@@ -226,7 +226,9 @@ conda activate mattergen
 # Clone and install MatterGen from source
 git clone https://github.com/microsoft/mattergen.git
 cd mattergen
-pip install -e .
+pip install -e . \
+    --extra-index-url https://download.pytorch.org/whl/cu118 \
+    --no-build-isolation
 cd ..
 
 # Verify
