@@ -65,7 +65,7 @@ deduplication:
 # -----------------------------------------------------------------------------
 dft_screening:
   n_candidates: 8
-  nproc: 1
+  nproc: 32
   kpoints: [2, 2, 2]
 
   # FIX: was 35 Ry — too low for kjpaw PAW pseudopotentials
@@ -106,7 +106,7 @@ dft_screening:
 # -----------------------------------------------------------------------------
 dft_relax:
   n_candidates: 3
-  nproc: 1
+  nproc: 32
   kpoints: [3, 3, 3]
   ecutwfc: 45
   ecutrho: 360

@@ -160,6 +160,8 @@ def _parse_run_dir(run_dir: Path, qe_output_name: str) -> Optional[Dict]:
     dict with keys:
         run_dir, converged, energy_ry, energy_ev, n_atoms, energy_ev_per_atom
     """
+    from maccai_battery.utils import parse_qe_final_structure
+    
     out_path = run_dir / qe_output_name
     if not out_path.exists():
         return None
@@ -180,6 +182,7 @@ def _parse_run_dir(run_dir: Path, qe_output_name: str) -> Optional[Dict]:
         return {
             "run_dir":  str(run_dir),
             "error":    str(exc),
+            "structure": parse_qe_final_structure(text),  # ← ADD THIS
         }
 
 
@@ -287,68 +290,46 @@ def _match_scf_to_candidates(
 def _match_relax_to_candidates(
     relax_dirs: List[Path],
     db_records: List[Dict],
+    n_relax_select: int,
+    qe_output_name: str,
     logger,
 ) -> List[Tuple[str, Dict, Path]]:
-    """Match relaxation run directories to candidate IDs by filename.
-
-    The Colab notebook names relax directories after the ML-relaxed EXTXYZ
-    file, e.g.::
-
-        generated_crystals_frame48_ml_relaxed_relax/
-
-    We search candidates.ndjson for a record whose ``ml_relaxed`` path
-    contains ``frame48``.
-
-    Parameters
-    ----------
-    relax_dirs : list of Path
-    db_records : list of dict
-    logger
-
-    Returns
-    -------
-    list of (candidate_id, parsed_result_dict, run_dir_path)
-    """
+    """Match relax_0/1/2/... dirs to candidates by SCF energy rank order."""
     import re
 
-    # Build a frame-index → candidate_id lookup
-    frame_to_record: Dict[int, Dict] = {}
-    for record in db_records:
-        ml_path = record.get("structure_files", {}).get("ml_relaxed", "") or ""
-        m = re.search(r"frame(\d+)_ml_relaxed", ml_path)
-        if m:
-            frame_to_record[int(m.group(1))] = record
+    # Top-N by SCF energy — same selection order used in step 4
+    def _scf_energy(r):
+        e = r.get("dft_jobs", {}).get("scf", {}).get("energy_eV_per_atom")
+        return e if e is not None else float("inf")
 
-    matched: List[Tuple[str, Dict, Path]] = []
+    ranked = sorted(
+        [r for r in db_records if r.get("dft_jobs", {}).get("scf", {}).get("energy_eV_per_atom") is not None],
+        key=_scf_energy,
+    )
+    top_n = ranked[:n_relax_select]
 
-    for run_dir in relax_dirs:
-        # Extract frame index from the run directory name
-        m = re.search(r"frame(\d+)_ml_relaxed", run_dir.name)
-        if not m:
-            logger.debug(
-                "Relax dir '%s' does not contain a frame index — skipping.", run_dir.name
-            )
+    # Sort relax dirs by their trailing integer index
+    def _dir_index(d: Path) -> int:
+        m = re.search(r"(\d+)$", d.name)
+        return int(m.group(1)) if m else 999
+
+    sorted_dirs = sorted(relax_dirs, key=_dir_index)
+
+    matched = []
+    for run_dir in sorted_dirs:
+        idx = _dir_index(run_dir)
+        if idx >= len(top_n):
+            logger.warning("relax dir '%s' index %d out of range — skipping.", run_dir.name, idx)
             continue
 
-        frame_idx = int(m.group(1))
-        record    = frame_to_record.get(frame_idx)
-
-        if record is None:
-            logger.warning(
-                "No candidate found for frame%d (relax dir: %s).", frame_idx, run_dir.name
-            )
-            continue
-
-        result = _parse_run_dir(run_dir, "qe.out")
+        candidate = top_n[idx]
+        result = _parse_run_dir(run_dir, qe_output_name)
         if result is None:
-            logger.warning("No QE output found in %s — skipping.", run_dir)
+            logger.warning("No QE output in %s — skipping.", run_dir)
             continue
 
-        matched.append((record["id"], result, run_dir))
-        logger.debug(
-            "Matched relax frame%d → candidate %s (%s)",
-            frame_idx, record["id"], record.get("formula", "?"),
-        )
+        matched.append((candidate["id"], result, run_dir))
+        logger.debug("Matched %s → %s (%s)", run_dir.name, candidate["id"], candidate.get("formula", "?"))
 
     return matched
 
@@ -581,7 +562,12 @@ def main() -> None:
             relax_dirs = _find_relax_dirs(relax_root)
             logger.info("Found %d relaxation run directories.", len(relax_dirs))
 
-            relax_matches = _match_relax_to_candidates(relax_dirs, db_records, logger)
+            relax_matches = _match_relax_to_candidates(
+                relax_dirs, db_records,
+                cfg.dft_relax.n_candidates,
+                args.qe_output_name,
+                logger,
+            )
 
             for cid, result, run_dir in relax_matches:
                 if "error" in result:
@@ -606,6 +592,7 @@ def main() -> None:
                             n_atoms   = None,
                             run_dir   = str(run_dir),
                             status    = "failed",
+                            structure = None,
                         )
                     else:
                         db.update_dft_relax(
@@ -614,6 +601,7 @@ def main() -> None:
                             n_atoms   = result.get("n_atoms"),
                             run_dir   = str(run_dir),
                             status    = "done" if result.get("converged") else "unconverged",
+                            structure = result.get("structure"),   # ← ADD THIS
                         )
 
             logger.info("Relax merge: %d candidates updated.", len(relax_matches))

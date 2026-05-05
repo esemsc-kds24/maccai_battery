@@ -6,7 +6,7 @@
 # This script provides a single command to run the full pipeline or any
 # contiguous subset of steps.
 #
-# Pipeline steps:
+# Pipeline steps
 #   1. generate      — MatterGen crystal structure generation
 #   2. relax         — MatterSim ML geometry relaxation
 #   3. sanity_check  — Structural checks & candidate database builder
@@ -58,6 +58,7 @@ from typing import List, Optional
 # Make sure the package is importable even when run from the repo root
 # ---------------------------------------------------------------------------
 _HERE = Path(__file__).resolve().parent
+_PROJECT_ROOT = _HERE if (_HERE / "scripts").exists() else _HERE.parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
@@ -70,8 +71,7 @@ STEPS = {
     1: {
         "name": "generate",
         "label": "Crystal generation (MatterGen)",
-        "script": "scripts/0generate.py",
-        "env_note": "Requires: conda activate mattergen",
+        "script": "scripts/generate.py",
     },
     2: {
         "name": "relax",
@@ -292,7 +292,7 @@ def _resolve_steps(args: argparse.Namespace) -> List[int]:
 def _build_cmd(step_num: int, args: argparse.Namespace) -> List[str]:
     """Build the subprocess command for a given step."""
     step = STEPS[step_num]
-    script = str(_HERE / step["script"])
+    script = str(_PROJECT_ROOT / step["script"])
     cmd = [sys.executable, script]
 
     # Common args

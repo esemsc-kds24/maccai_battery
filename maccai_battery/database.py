@@ -93,6 +93,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from scripts import relax
+
 logger = logging.getLogger(__name__)
 
 
@@ -475,6 +477,7 @@ class CandidateDatabase:
         n_atoms: Optional[int],
         run_dir: Optional[str] = None,
         status: str = "done",
+        structure: Optional[dict] = None,
     ) -> bool:
         """Update the ionic relaxation DFT results for a candidate.
 
@@ -509,6 +512,8 @@ class CandidateDatabase:
                 )
                 relax["n_atoms"]            = n_atoms
                 relax["run_dir"]            = run_dir
+                if structure is not None:
+                    relax["structure"] = structure      # ← ADD THIS
                 relax["completed_at"]       = _utc_now()
 
                 record["dft_jobs"]["status"] = status
