@@ -35,53 +35,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# MP POTCAR titles — must match what MaterialsProject2020Compatibility expects.
-# Generic "PAW_PBE Fe" is rejected; the actual MP titles use suffixes like
-# _pv, _sv etc.  Extend this dict if you add new elements to the chemical system.
-# ---------------------------------------------------------------------------
-_MP_POTCAR_MAP: Dict[str, str] = {
-    "Li": "PAW_PBE Li_sv",
-    "Fe": "PAW_PBE Fe_pv",
-    "Mn": "PAW_PBE Mn_pv",
-    "Co": "PAW_PBE Co",
-    "Ni": "PAW_PBE Ni_pv",
-    "V":  "PAW_PBE V_sv",
-    "Ti": "PAW_PBE Ti_pv",
-    "Cr": "PAW_PBE Cr_pv",
-    "Cu": "PAW_PBE Cu_pv",
-    "Na": "PAW_PBE Na_pv",
-    "K":  "PAW_PBE K_sv",
-    "Ca": "PAW_PBE Ca_sv",
-    "Mg": "PAW_PBE Mg_pv",
-    "Al": "PAW_PBE Al",
-    "Si": "PAW_PBE Si",
-    "P":  "PAW_PBE P",
-    "S":  "PAW_PBE S",
-    "O":  "PAW_PBE O",
-    "F":  "PAW_PBE F",
-    "Cl": "PAW_PBE Cl",
-}
-
-# ---------------------------------------------------------------------------
-# Standard MP GGA+U Hubbard U values — same values used in the MP database.
-# These MUST match MP's values exactly so that MP2020Compatibility applies
-# the correct energy correction to your candidates.
-# Only elements in this dict get GGA+U treatment; everything else is plain GGA.
-# ---------------------------------------------------------------------------
-_MP_HUBBARD_U: Dict[str, float] = {
-    "Fe": 5.3,
-    "Mn": 3.9,
-    "Co": 3.32,
-    "Ni": 6.2,
-    "V":  3.25,
-    "Cr": 3.7,
-    "Mo": 4.38,
-    "W":  6.2,
-}
-
-
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
@@ -106,26 +59,23 @@ class HullResult:
     dft_energy_eV_per_atom : Optional[float]
         DFT total energy per atom used for the hull calculation (eV/atom).
     mp_stable_phases : List[str]
-        Competing MP stable phases with decomposition fractions.
+        Competing MP stable phases used to build the hull for this composition.
     is_stable : Optional[bool]
         True if e_above_hull ≤ stability_threshold from config.
     stability_threshold_eV : float
         The threshold used for ``is_stable`` (from config).
-    used_ml_structure : bool
-        True if the ML-relaxed geometry was used as fallback (DFT relax failed).
     error : Optional[str]
         Exception message if the computation failed, else None.
     """
 
     candidate_id: str
     formula: str
-    e_above_hull_eV_per_atom: Optional[float]   = None
-    dft_energy_eV_per_atom: Optional[float]     = None
-    mp_stable_phases: List[str]                 = field(default_factory=list)
-    is_stable: Optional[bool]                   = None
-    stability_threshold_eV: float               = 0.1
-    used_ml_structure: bool                     = False
-    error: Optional[str]                        = None
+    e_above_hull_eV_per_atom: Optional[float]       = None
+    dft_energy_eV_per_atom: Optional[float]         = None
+    mp_stable_phases: List[str]                     = field(default_factory=list)
+    is_stable: Optional[bool]                       = None
+    stability_threshold_eV: float                   = 0.1
+    error: Optional[str]                            = None
 
     @property
     def success(self) -> bool:
@@ -140,7 +90,6 @@ class HullResult:
             "mp_stable_phases":         self.mp_stable_phases,
             "is_stable":                self.is_stable,
             "stability_threshold_eV":   self.stability_threshold_eV,
-            "used_ml_structure":        self.used_ml_structure,
             "error":                    self.error,
         }
 
@@ -148,10 +97,9 @@ class HullResult:
         if not self.success:
             return f"[ERROR] {self.formula} ({self.candidate_id}): {self.error}"
         status = "STABLE" if self.is_stable else "METASTABLE"
-        suffix = " [ML geometry]" if self.used_ml_structure else ""
         return (
             f"[{status}] {self.formula} ({self.candidate_id})  "
-            f"ΔH_hull = {self.e_above_hull_eV_per_atom:.4f} eV/atom{suffix}"
+            f"ΔH_hull = {self.e_above_hull_eV_per_atom:.4f} eV/atom"
         )
 
 
@@ -182,17 +130,14 @@ class HullAnalyzer:
     """
 
     def __init__(self, cfg, api_key: Optional[str] = None) -> None:
-        self._cfg      = cfg
-        self._api_key  = api_key or os.environ.get("MP_API_KEY")
+        self._cfg     = cfg
+        self._api_key = api_key or os.environ.get("MP_API_KEY")
         self._hull_cfg = getattr(cfg, "hull", None)
         self._threshold = (
             self._hull_cfg.stability_threshold_eV
             if self._hull_cfg is not None
             else 0.1
         )
-        # Cache the phase diagram by chemical-system key so that calling
-        # run() multiple times doesn't re-hit the MP API each time.
-        self._pd_cache: Dict[str, Tuple] = {}
 
         if not self._api_key:
             raise EnvironmentError(
@@ -234,7 +179,7 @@ class HullAnalyzer:
             One result per candidate with a non-null DFT energy.
             Candidates without a completed DFT energy are skipped.
         """
-        # Collect candidates that have a DFT energy
+        # Collect those candidates that have a DFT energy
         with_energy = []
         for rec in candidates:
             e = _get_dft_energy(rec, energy_source)
@@ -244,8 +189,8 @@ class HullAnalyzer:
         if not with_energy:
             logger.warning(
                 "No candidates have a completed %s energy — nothing to do.\n"
-                "Run the DFT pipeline and merge results with "
-                "scripts/05_merge_dft_results.py first.",
+                "Run the DFT pipeline (Colab notebook) and merge results "
+                "back with scripts/04_merge_dft_results.py first.",
                 energy_source,
             )
             return []
@@ -259,10 +204,10 @@ class HullAnalyzer:
         elements = _parse_elements(self._cfg.generation.chemical_system)
         logger.info("Fetching MP reference data for elements: %s", elements)
 
-        # Build (or retrieve from cache) the phase diagram
+        # Build the phase diagram from MP data
         phase_diagram, compat = self._build_phase_diagram(elements)
         logger.info(
-            "Phase diagram ready with %d entries.",
+            "Phase diagram built with %d entries.",
             len(phase_diagram.all_entries),
         )
 
@@ -276,7 +221,7 @@ class HullAnalyzer:
             else:
                 logger.warning("  %s", result.summary_line())
 
-        # Summary counts
+        # Summary
         stable     = [r for r in results if r.is_stable]
         metastable = [r for r in results if r.success and not r.is_stable]
         failed     = [r for r in results if not r.success]
@@ -288,29 +233,32 @@ class HullAnalyzer:
         return results
 
     def print_ranking(self, results: List[HullResult]) -> None:
-        """Print a formatted ranking table sorted by ΔH_hull."""
+        """Print a formatted ranking table sorted by ΔH_hull.
+
+        Parameters
+        ----------
+        results : list of HullResult
+        """
         successful = sorted(
             [r for r in results if r.success],
             key=lambda r: r.e_above_hull_eV_per_atom,  # type: ignore[arg-type]
         )
         failed = [r for r in results if not r.success]
 
-        width = 80
+        width = 72
         print(f"\n{'=' * width}")
         print(f"  Hull Analysis — Stability Ranking")
         print(f"  Threshold: ΔH ≤ {self._threshold:.3f} eV/atom = stable")
         print(f"{'=' * width}")
-        print(f"  {'Rank':>4}  {'ID':<14}  {'Formula':<16}  "
-              f"{'ΔH_hull (eV/a)':>16}  {'Status':<20}")
-        print(f"  {'-' * 74}")
+        print(f"  {'Rank':>4}  {'ID':<12}  {'Formula':<14}  "
+              f"{'ΔH_hull (eV/a)':>16}  {'Status':<12}")
+        print(f"  {'-' * 64}")
 
         for rank, r in enumerate(successful, start=1):
             status = "✓ STABLE" if r.is_stable else "  metastable"
-            if r.used_ml_structure:
-                status += " [ML geom]"
             print(
-                f"  {rank:>4}  {r.candidate_id:<14}  {r.formula:<16}  "
-                f"{r.e_above_hull_eV_per_atom:>16.4f}  {status:<20}"
+                f"  {rank:>4}  {r.candidate_id:<12}  {r.formula:<14}  "
+                f"{r.e_above_hull_eV_per_atom:>16.4f}  {status}"
             )
 
         if failed:
@@ -323,11 +271,16 @@ class HullAnalyzer:
     def update_database(
         self,
         results: List[HullResult],
-        db,             # CandidateDatabase
+        db,              # CandidateDatabase
     ) -> int:
         """Write hull analysis results back into candidates.ndjson.
 
         Stores results under a ``"hull_analysis"`` key in each record.
+
+        Parameters
+        ----------
+        results : list of HullResult
+        db : CandidateDatabase
 
         Returns
         -------
@@ -350,14 +303,11 @@ class HullAnalyzer:
         return n_updated
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Internal
     # ------------------------------------------------------------------
 
-    def _build_phase_diagram(self, elements: List[str]) -> Tuple:
+    def _build_phase_diagram(self, elements: List[str]):
         """Fetch MP reference energies and build a pymatgen PhaseDiagram.
-
-        Results are cached by chemical system so the MP API is only hit once
-        per unique element set per HullAnalyzer instance.
 
         Parameters
         ----------
@@ -366,22 +316,16 @@ class HullAnalyzer:
 
         Returns
         -------
-        (PhaseDiagram, MaterialsProject2020Compatibility)
+        pymatgen.analysis.phase_diagram.PhaseDiagram
         """
-        # --- Cache check: return immediately if already built ---
-        cache_key = "-".join(sorted(elements))
-        if cache_key in self._pd_cache:
-            logger.debug("Phase diagram cache hit for '%s'.", cache_key)
-            return self._pd_cache[cache_key]
-
-        from mp_api.client import MPRester                              # type: ignore[import]
+        from mp_api.client import MPRester  # type: ignore[import]
         from pymatgen.analysis.phase_diagram import PhaseDiagram
         from pymatgen.entries.compatibility import MaterialsProject2020Compatibility
 
         with MPRester(self._api_key) as mpr:
             # Fetch ALL entries in the chemsys — no energy_above_hull filter.
-            # Filtering to e.g. (0, 0.05) can silently drop phases that anchor
-            # the hull at intermediate compositions, making hull distances wrong.
+            # Filtering to (0, 0.05) can silently drop phases that anchor the
+            # hull at intermediate compositions, making hull distances wrong.
             entries = mpr.get_entries_in_chemsys(elements=elements)
 
         if not entries:
@@ -392,16 +336,16 @@ class HullAnalyzer:
 
         logger.debug("Fetched %d raw MP entries.", len(entries))
 
-        # Apply the standard MP2020 compatibility scheme.
-        # This corrects for oxide/peroxide errors and GGA+U energy offsets
-        # so that your candidate energies are on the same scale as MP's data.
+        # Apply the standard MP2020 compatibility scheme to the reference data.
+        # This ensures the MP entries are on a consistent energy scale
+        # (oxide/peroxide corrections, GGA+U corrections for d-electron systems).
         compat = MaterialsProject2020Compatibility()
         entries_corrected = compat.process_entries(entries, clean=True)
 
         if not entries_corrected:
             raise RuntimeError(
                 "All MP entries were rejected by MaterialsProject2020Compatibility. "
-                "This usually means entries are missing required parameters. "
+                "This usually means the entries are missing required parameters. "
                 "Try fetching with compatible_only=True in MPRester."
             )
 
@@ -409,12 +353,7 @@ class HullAnalyzer:
             "%d / %d MP entries survived compatibility processing.",
             len(entries_corrected), len(entries),
         )
-
-        phase_diagram = PhaseDiagram(entries_corrected)
-
-        # Store in cache before returning
-        self._pd_cache[cache_key] = (phase_diagram, compat)
-        return phase_diagram, compat
+        return PhaseDiagram(entries_corrected), compat
 
     def _evaluate_candidate(
         self,
@@ -423,157 +362,88 @@ class HullAnalyzer:
         phase_diagram,
         compat,
     ) -> HullResult:
-        """Compute ΔH_hull for a single candidate record.
+        """Compute the hull distance for a single candidate.
 
-        Steps
-        -----
-        1. Resolve the structure (DFT-relaxed → ML-relaxed fallback).
-        2. Determine Hubbard U values from _MP_HUBBARD_U for elements present.
-        3. Build a ComputedStructureEntry with correct MP-compatible parameters.
-        4. Apply MP2020Compatibility corrections.
-        5. Query the phase diagram for e_above_hull and decomposition products.
+        Parameters
+        ----------
+        record : dict
+            Candidate record from the database.
+        e_pa : float
+            DFT energy per atom (eV/atom).
+        phase_diagram : pymatgen.analysis.phase_diagram.PhaseDiagram
+            Phase diagram built from corrected MP reference entries.
+        compat : MaterialsProject2020Compatibility
+            Same instance used to process the MP reference entries — must be
+            applied to the candidate entry so both are on the same energy scale.
+
+        Returns
+        -------
+        HullResult
         """
-        from pymatgen.core import Composition, Structure
-        from pymatgen.entries.computed_entries import ComputedStructureEntry
+        from pymatgen.core import Composition
+        from pymatgen.entries.computed_entries import ComputedEntry
 
         cid     = record.get("id", "unknown")
         formula = record.get("formula", "unknown")
 
         result = HullResult(
-            candidate_id           = cid,
-            formula                = formula,
-            dft_energy_eV_per_atom = e_pa,
-            stability_threshold_eV = self._threshold,
+            candidate_id            = cid,
+            formula                 = formula,
+            dft_energy_eV_per_atom  = e_pa,
+            stability_threshold_eV  = self._threshold,
         )
 
         try:
-            # ----------------------------------------------------------
-            # 1. Resolve structure
-            #    Priority: DFT-relaxed → ML-relaxed fallback → error
-            # ----------------------------------------------------------
-            structure_dict = (
-                record.get("dft_jobs", {}).get("relax", {}).get("structure")
-                or record.get("structure")          # legacy / top-level fallback
-            )
-
-            if structure_dict:
-                structure = Structure.from_dict(structure_dict)
-            else:
-                # Fallback to ML-relaxed geometry (less accurate but better than nothing)
-                ml_path = record.get("structure_files", {}).get("ml_relaxed")
-                if ml_path and Path(ml_path).exists():
-                    try:
-                        from ase.io import read
-                        from pymatgen.io.ase import AseAtomsAdaptor
-                        atoms = read(ml_path)
-                        structure = AseAtomsAdaptor.get_structure(atoms)
-                        result.used_ml_structure = True
-                        logger.warning(
-                            "%s (%s): no DFT-relaxed structure found — "
-                            "falling back to ML-relaxed geometry. "
-                            "Hull distance will be less accurate.",
-                            cid, formula,
-                        )
-                    except Exception as ase_err:
-                        raise ValueError(
-                            f"ML-relaxed structure at '{ml_path}' could not be read: {ase_err}"
-                        )
-                else:
-                    raise ValueError(
-                        f"No structure available for {cid} ({formula}). "
-                        f"Run 05_merge_dft_results.py to store the relaxed structure, "
-                        f"or ensure structure_files.ml_relaxed is set in the record."
-                    )
-
-            # ----------------------------------------------------------
-            # 2. Derive atom count and total energy from the actual cell.
-            #    Using structure.num_sites (not the reduced-formula count)
-            #    is essential for non-primitive supercells.
-            # ----------------------------------------------------------
-            n_atoms = structure.num_sites
+            comp    = Composition(formula)
+            n_atoms = int(sum(comp.values()))
             e_total = e_pa * n_atoms
 
-            # ----------------------------------------------------------
-            # 3. Hubbard U values
-            #    Use the standard MP values from _MP_HUBBARD_U so that
-            #    MP2020Compatibility applies exactly the same GGA+U
-            #    correction as it does to the reference entries.
-            #    Only elements actually present in the composition get U.
-            # ----------------------------------------------------------
-            comp       = Composition(formula)
-            elements_in_comp = set(comp.as_dict().keys())
+            # Read U values from config so hubbards stay in sync with QE settings.
+            hub_cfg = getattr(getattr(self._cfg, "dft_relax", None), "hubbard_u", None)
+            u_vals  = dict(getattr(hub_cfg, "U", {}) or {}) if hub_cfg else {}
 
-            hubbards   = {
-                el: _MP_HUBBARD_U[el]
-                for el in elements_in_comp
-                if el in _MP_HUBBARD_U
-            }
-            is_hubbard = bool(hubbards)
-            run_type   = "GGA+U" if is_hubbard else "GGA"
-
-            logger.debug(
-                "%s: run_type=%s, hubbards=%s",
-                cid, run_type, hubbards,
-            )
-
-            # ----------------------------------------------------------
-            # 4. Build the ComputedStructureEntry.
-            #    ComputedStructureEntry (not ComputedEntry) is required
-            #    here because MP2020Compatibility reads the structure to
-            #    detect oxide/peroxide oxygen species for corrections.
-            # ----------------------------------------------------------
-            raw_entry = ComputedStructureEntry(
-                structure = structure,
-                energy    = e_total,
-                entry_id  = cid,
-                parameters = {
-                    "run_type":   run_type,
-                    "is_hubbard": is_hubbard,
-                    "hubbards":   hubbards,
+            # Build a ComputedEntry (not PDEntry) so compat can apply the same
+            # oxide/GGA+U energy corrections that were applied to the MP reference
+            # entries. Without this the candidate and references are on different
+            # energy scales and every ΔH_hull value is wrong.
+            raw_entry = ComputedEntry(
+                composition=comp,
+                energy=e_total,
+                entry_id=cid,
+                parameters={
+                    "run_type":    "GGA+U" if u_vals else "GGA",
+                    "is_hubbard":  bool(u_vals),
+                    "hubbards":    u_vals,
+                    # Approximate POTCAR spec needed for the oxide correction.
+                    # The hash field is not checked by MaterialsProject2020Compatibility.
                     "potcar_spec": [
-                        {
-                            "titel": _MP_POTCAR_MAP.get(el, f"PAW_PBE {el}"),
-                            "hash":  None,
-                        }
-                        for el in sorted(elements_in_comp)
+                        {"titel": f"PAW_PBE {el} ", "hash": None}
+                        for el in sorted(comp.as_dict().keys())
                     ],
                 },
             )
 
-            # ----------------------------------------------------------
-            # 5. Apply MP2020Compatibility corrections
-            # ----------------------------------------------------------
             corrected = compat.process_entries([raw_entry], clean=True)
-
             if not corrected:
-                # Uncomment for debugging:
-                # logger.debug(compat.explain(raw_entry))
                 raise ValueError(
-                    f"Entry rejected by MaterialsProject2020Compatibility for "
-                    f"{formula} ({cid}). "
-                    f"Check POTCAR titles and Hubbard U values match MP conventions."
+                    f"ComputedEntry for {formula} was rejected by "
+                    "MaterialsProject2020Compatibility. Check that hubbards "
+                    "and run_type match what the compat scheme expects."
                 )
-
             entry = corrected[0]
 
-            # ----------------------------------------------------------
-            # 6. Compute hull distance and decomposition products
-            # ----------------------------------------------------------
+            # pymatgen PhaseDiagram.get_e_above_hull returns eV/atom
             e_hull = phase_diagram.get_e_above_hull(entry)
 
+            # Collect names of the competing stable phases at this composition
             decomp, _ = phase_diagram.get_decomp_and_e_above_hull(entry)
-
-            # Store decomposition products with their fractional amounts
-            # e.g. "LiFePO4 (0.50)" — useful for understanding what the
-            # candidate decomposes into if it's metastable.
             competing = sorted(
-                f"{e.composition.reduced_formula} ({amt:.3f})"
-                for e, amt in decomp.items()
+                {str(e.composition.reduced_formula) for e in decomp}
             )
 
             result.e_above_hull_eV_per_atom = float(e_hull)
             result.mp_stable_phases         = competing
-            result.is_stable                = float(e_hull) <= self._threshold
+            result.is_stable                = e_hull <= self._threshold
 
         except Exception as exc:
             result.error = f"{type(exc).__name__}: {exc}"
@@ -638,7 +508,7 @@ def _get_dft_energy(
     -------
     float or None
     """
-    dft   = record.get("dft_jobs", {})
+    dft = record.get("dft_jobs", {})
     stage = dft.get(source, {})
     return stage.get("energy_eV_per_atom")
 
@@ -697,6 +567,7 @@ def check_mp_api_key(api_key: Optional[str] = None) -> bool:
     try:
         from mp_api.client import MPRester  # type: ignore[import]
         with MPRester(key) as mpr:
+            # Minimal query to test authentication
             entries = mpr.get_entries_in_chemsys(["Li", "O"])
         logger.info("MP API key is valid. Retrieved %d Li-O entries.", len(entries))
         return True

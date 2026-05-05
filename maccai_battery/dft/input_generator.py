@@ -288,8 +288,7 @@ def make_scf_input(
         conv_thr=scr.conv_thr,
         mixing_beta=scr.mixing_beta,
         mixing_mode=getattr(scr, "mixing_mode", "plain"),
-        mixing_ndim=getattr(scr, "nmix", 8),
-#        nmix=getattr(scr, "nmix", 8),
+        nmix=getattr(scr, "nmix", 8),
     )
 
     # ---- Cards ----
@@ -357,8 +356,8 @@ def make_relax_input(
         ntyp=ntyp,
         ecutwfc=relax.ecutwfc,
         ecutrho=relax.ecutrho,
-        smearing=_cfg_get(relax, "smearing", "mp"),
-        degauss=_cfg_get(relax, "degauss", 0.03),
+        smearing=relax.smearing,        # FIXED: was hardcoded "mp"
+        degauss=relax.degauss,          # FIXED: was hardcoded 0.03
         spin_polarised=relax.spin_polarised,
         species_order=species_order,
         starting_magnetization=relax.starting_magnetization,
@@ -376,9 +375,7 @@ def make_relax_input(
         conv_thr=relax.conv_thr,
         mixing_beta=relax.mixing_beta,
         mixing_mode=getattr(relax, "mixing_mode", "plain"),
-        mixing_ndim=getattr(relax, "nmix", 8),
-#        mixing_ndim=getattr(scr, "nmix", 8),
-#        nmix=getattr(relax, "nmix", 8),
+        nmix=getattr(relax, "nmix", 8),
     )
 
     # ---- IONS ----
