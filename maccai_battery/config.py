@@ -163,10 +163,13 @@ class DFTScreeningConfig:
     degauss: float                           = 0.03
     conv_thr: float                          = 1.0e-4
     mixing_beta: float                       = 0.3
+    mixing_mode: str                         = "plain"
+    nmix: int                                = 8
     spin_polarised: bool                     = True
     starting_magnetization: Dict[str, float] = field(
         default_factory=lambda: {"Li": 0.0, "Fe": 0.3, "P": 0.0, "O": 0.0}
     )
+    hubbard_u: Optional[dict]                = None
 
 
 @dataclass
@@ -180,10 +183,15 @@ class DFTRelaxConfig:
     nstep: int                               = 10
     conv_thr: float                          = 1.0e-5
     mixing_beta: float                       = 0.3
+    mixing_mode: str                         = "plain"
+    nmix: int                                = 8
+    smearing: str                            = "mv"
+    degauss: float                           = 0.01
     spin_polarised: bool                     = True
     starting_magnetization: Dict[str, float] = field(
         default_factory=lambda: {"Li": 0.0, "Fe": 0.4, "P": 0.0, "O": 0.0}
     )
+    hubbard_u: Optional[dict]                = None
 
 
 @dataclass
