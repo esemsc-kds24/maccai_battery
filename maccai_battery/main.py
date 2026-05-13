@@ -6,18 +6,19 @@
 # This script provides a single command to run the full pipeline or any
 # contiguous subset of steps.
 #
-# Pipeline steps
+# Pipeline steps:
 #   1. generate      — MatterGen crystal structure generation
 #   2. relax         — MatterSim ML geometry relaxation
 #   3. sanity_check  — Structural checks & candidate database builder
 #   4. dft           — Quantum ESPRESSO SCF screening + ionic relaxation
 #   5. merge         — Merge DFT results into candidates.ndjson
-#   6. hull          — Materials Project convex hull stability analysis
+#   6. elemental_ref — QE SCF on Li/Fe/P/O elemental reference phases
+#   7. hull          — Materials Project convex hull stability analysis
 #
 # Usage:
-#   python main.py                        # run all steps 1–6
+#   python main.py                        # run all steps 1–7
 #   python main.py --steps 1 2 3          # run only steps 1, 2, 3
-#   python main.py --from-step 3          # run steps 3 through 6
+#   python main.py --from-step 3          # run steps 3 through 7
 #   python main.py --to-step 3            # run steps 1 through 3
 #   python main.py --step 4               # run only step 4
 #   python main.py --config my_config.yaml
@@ -27,7 +28,8 @@
 #   python main.py --step 4 --nproc 8 --n-scf 10 --n-relax 4
 #   python main.py --step 4 --dft-stage scf
 #   python main.py --step 2 --device cuda
-#   python main.py --step 6 --energy-source scf
+#   python main.py --step 6 --nproc 4 --elements Li Fe
+#   python main.py --step 7 --energy-source scf
 #
 # Environment notes:
 #   Step 1 requires the MatterGen environment:
@@ -58,7 +60,6 @@ from typing import List, Optional
 # Make sure the package is importable even when run from the repo root
 # ---------------------------------------------------------------------------
 _HERE = Path(__file__).resolve().parent
-_PROJECT_ROOT = _HERE if (_HERE / "scripts").exists() else _HERE.parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
@@ -72,6 +73,7 @@ STEPS = {
         "name": "generate",
         "label": "Crystal generation (MatterGen)",
         "script": "scripts/generate.py",
+        "env_note": "Requires: conda activate mattergen",
     },
     2: {
         "name": "relax",
@@ -98,6 +100,12 @@ STEPS = {
         "env_note": "Requires: conda activate maccai",
     },
     6: {
+        "name": "elemental_ref",
+        "label": "Elemental QE reference energies (Li/Fe/P/O)",
+        "script": "scripts/elemental_references.py",
+        "env_note": "Requires: conda activate maccai + pw.x on PATH",
+    },
+    7: {
         "name": "hull",
         "label": "Hull stability analysis (Materials Project)",
         "script": "scripts/hull_analysis.py",
@@ -122,7 +130,7 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             Examples:
-              # Run the full pipeline (all 6 steps):
+              # Run the full pipeline (all 7 steps):
               python main.py
 
               # Run only steps 1, 2, 3:
@@ -140,11 +148,14 @@ def _parse_args() -> argparse.Namespace:
               # Run step 2 on GPU:
               python main.py --step 2 --device cuda
 
+              # Compute only Li and O elemental references with 4 MPI procs:
+              python main.py --step 6 --elements Li O --nproc 4
+
               # Dry-run (print plan without executing):
               python main.py --dry-run
 
               # Run hull analysis using SCF energies:
-              python main.py --step 6 --energy-source scf
+              python main.py --step 7 --energy-source scf
         """),
     )
 
@@ -154,7 +165,7 @@ def _parse_args() -> argparse.Namespace:
         "--step",
         type=int,
         choices=ALL_STEPS,
-        metavar="{1..6}",
+        metavar="{1..7}",
         help="Run exactly one step by number.",
     )
     step_group.add_argument(
@@ -169,14 +180,14 @@ def _parse_args() -> argparse.Namespace:
         "--from-step",
         type=int,
         choices=ALL_STEPS,
-        metavar="{1..6}",
-        help="Run from this step through step 6.",
+        metavar="{1..7}",
+        help="Run from this step through step 7.",
     )
     step_group.add_argument(
         "--to-step",
         type=int,
         choices=ALL_STEPS,
-        metavar="{1..6}",
+        metavar="{1..7}",
         help="Run from step 1 through this step.",
     )
 
@@ -249,8 +260,19 @@ def _parse_args() -> argparse.Namespace:
         help="MPI processes for pw.x (step 4).",
     )
 
-    # ---- Step 6 (hull) options ----
-    hull_group = parser.add_argument_group("Step 6 — Hull analysis options")
+    # ---- Step 6 (elemental references) options ----
+    ref_group = parser.add_argument_group("Step 6 — Elemental reference options")
+    ref_group.add_argument(
+        "--elements",
+        nargs="+",
+        choices=["Li", "Fe", "P", "O"],
+        default=None,
+        metavar="EL",
+        help="Elements to compute in step 6 (default: all four Li Fe P O).",
+    )
+
+    # ---- Step 7 (hull) options ----
+    hull_group = parser.add_argument_group("Step 7 — Hull analysis options")
     hull_group.add_argument(
         "--energy-source",
         choices=["scf", "relax"],
@@ -292,7 +314,7 @@ def _resolve_steps(args: argparse.Namespace) -> List[int]:
 def _build_cmd(step_num: int, args: argparse.Namespace) -> List[str]:
     """Build the subprocess command for a given step."""
     step = STEPS[step_num]
-    script = str(_PROJECT_ROOT / step["script"])
+    script = str(_HERE / step["script"])
     cmd = [sys.executable, script]
 
     # Common args
@@ -325,6 +347,14 @@ def _build_cmd(step_num: int, args: argparse.Namespace) -> List[str]:
             cmd.append("--dry-run")
 
     elif step_num == 6:
+        if args.elements:
+            cmd += ["--elements"] + args.elements
+        if args.nproc is not None:
+            cmd += ["--nproc", str(args.nproc)]
+        if args.dry_run:
+            cmd.append("--dry-run")
+
+    elif step_num == 7:
         if args.energy_source:
             cmd += ["--energy-source", args.energy_source]
         if args.threshold is not None:
@@ -492,12 +522,12 @@ def main() -> None:
     else:
         logger.info("All steps completed successfully.")
         logger.info("")
-        if 6 in completed:
+        if 7 in completed:
             logger.info(
                 "Results are in:  %s",
                 Path("output").resolve() if Path("output").exists() else "output/",
             )
-            logger.info("  candidates.ndjson   — full candidate database with DFT energies")
+            logger.info("  candidates.ndjson        — full candidate database with DFT energies")
             logger.info("  hull_analysis_report.txt — stability ranking")
         elif 3 in completed:
             logger.info("Next: run step 4 (DFT) when QE is available:")

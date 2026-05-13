@@ -1,7 +1,7 @@
 # MACCAI Battery Materials Discovery Pipeline
 
 > **End-to-end ML-to-DFT pipeline for computational battery materials discovery.**
-> MatterGen → MatterSim → Sanity Checks → Quantum ESPRESSO DFT → Hull Analysis
+> MatterGen → MatterSim → Sanity Checks → Quantum ESPRESSO DFT → Elemental References → Hull Analysis
 
 ---
 
@@ -14,7 +14,7 @@
 5. [Setup & Installation](#setup--installation)
    - [Prerequisites](#prerequisites)
    - [Environment 1 — `mattergen` (Step 1)](#environment-1--mattergen-step-1)
-   - [Environment 2 — `maccai` (Steps 2–6)](#environment-2--maccai-steps-26)
+   - [Environment 2 — `maccai` (Steps 2–7)](#environment-2--maccai-steps-27)
    - [Install MatterSim](#install-mattersim)
    - [Install Quantum ESPRESSO](#install-quantum-espresso)
    - [Install pymatgen-io-espresso](#install-pymatgen-io-espresso)
@@ -30,7 +30,8 @@
    - [Step 3 — Sanity Checks & Candidate Database](#step-3--sanity-checks--candidate-database)
    - [Step 4 — DFT Calculations (Quantum ESPRESSO)](#step-4--dft-calculations-quantum-espresso)
    - [Step 5 — Merge DFT Results](#step-5--merge-dft-results)
-   - [Step 6 — Hull Stability Analysis](#step-6--hull-stability-analysis)
+   - [Step 6 — Elemental QE Reference Energies](#step-6--elemental-qe-reference-energies)
+   - [Step 7 — Hull Stability Analysis](#step-7--hull-stability-analysis)
 9. [Output Directory Structure](#output-directory-structure)
 10. [Candidate Database Schema](#candidate-database-schema)
 11. [DFT Notes & K-Point Convergence](#dft-notes--k-point-convergence)
@@ -65,6 +66,9 @@ Structural Sanity Checks (pymatgen)
     ▼
 Quantum ESPRESSO DFT — SCF + Ionic Relaxation
     │  high-accuracy single-point energies and structural optimisation
+    ▼
+Elemental QE Reference Energies (pw.x on Li/Fe/P/O)
+    │  establishes a common energy zero so QE and MP energies can be compared
     ▼
 Hull Analysis (Materials Project API)
     │  computes energy above the convex hull; flags thermodynamically stable candidates
@@ -119,7 +123,7 @@ export MP_API_KEY="your_materials_project_key"   # get one free at materialsproj
 conda activate mattergen
 python scripts/01_generate.py
 
-# ── 6b. Run Steps 2–6 in the main environment ────────────────────────────
+# ── 6b. Run Steps 2–7 in the main environment ────────────────────────────
 conda activate maccai
 python main.py --from-step 2
 ```
@@ -137,7 +141,8 @@ The final stability report is written to `output/hull_analysis_report.txt`.
 | 3 | `scripts/03_sanity_check.py` | pymatgen | `maccai` |
 | 4 | `scripts/04_dft.py` | Quantum ESPRESSO `pw.x` | `maccai` |
 | 5 | `scripts/05_merge_dft_results.py` | pymatgen + pandas | `maccai` |
-| 6 | `scripts/06_hull_analysis.py` | Materials Project API + pymatgen | `maccai` |
+| 6 | `scripts/elemental_references.py` | Quantum ESPRESSO `pw.x` | `maccai` |
+| 7 | `scripts/06_hull_analysis.py` | Materials Project API + pymatgen | `maccai` |
 
 ### Why two environments?
 
@@ -167,6 +172,7 @@ maccai_battery/
 │   └── dft/                      # DFT subpackage
 │       ├── __init__.py
 │       ├── input_generator.py    # QE input files (make_scf_input, make_relax_input)
+│       ├── elemental_inputs.py   # QE inputs for Li/Fe/P/O reference phases (step 6)
 │       ├── runner.py             # QE subprocess runner (run_qe_pw)
 │       ├── parser.py             # QE output/XML parser (parse_qe_xml, QEXMLResult)
 │       └── workflow.py           # Full DFT workflow (DFTWorkflow)
@@ -176,13 +182,14 @@ maccai_battery/
 │   ├── 03_sanity_check.py        # Step 3: Sanity checks + candidate database
 │   ├── 04_dft.py                 # Step 4: Quantum ESPRESSO SCF + relax
 │   ├── 05_merge_dft_results.py   # Step 5: Merge DFT results into database
-│   ├── 06_hull_analysis.py       # Step 6: Convex hull stability analysis
+│   ├── elemental_references.py   # Step 6: Elemental QE reference energies
+│   ├── 06_hull_analysis.py       # Step 7: Convex hull stability analysis
 │   └── download_pseudopotentials.py
 ├── tests/
 │   ├── __init__.py
 │   └── test_utils.py
 ├── config.yaml                   # Single source of truth for all parameters
-├── environment.yml               # Main conda env (steps 2–6, GPU-ready)
+├── environment.yml               # Main conda env (steps 2–7, GPU-ready)
 ├── environment_mattergen.yml     # MatterGen-only conda env (step 1)
 ├── requirements.txt
 ├── setup.py
@@ -240,7 +247,7 @@ mattergen-generate --help
 
 ---
 
-### Environment 2 — `maccai` (Steps 2–6)
+### Environment 2 — `maccai` (Steps 2–7)
 
 This is the primary environment used for everything after generation. It includes MatterSim (for ML
 relaxation), pymatgen, and the Materials Project API client.
@@ -365,7 +372,7 @@ For other chemical systems, add the corresponding element entries to `pseudopote
 Two environment variables are used by the pipeline:
 
 ```shell
-# Required for Step 6 (hull analysis)
+# Required for Step 7 (hull analysis)
 # Get a free key at: https://materialsproject.org/api
 export MP_API_KEY="your_key_here"
 
@@ -472,7 +479,7 @@ pseudopotentials:
 subprocesses, logs progress to the console, and stops cleanly if any step fails.
 
 ```shell
-# Run all 6 steps end-to-end
+# Run all 7 steps end-to-end
 python main.py
 
 # Preview what would run without executing anything
@@ -503,8 +510,11 @@ python main.py --step 2 --device cuda
 # Step 4 — parallel DFT with 16 MPI processes, SCF-only stage
 python main.py --step 4 --nproc 16 --n-scf 10 --n-relax 4 --dft-stage scf
 
-# Step 6 — use SCF energies with a tighter stability threshold
-python main.py --step 6 --energy-source scf --threshold 0.05
+# Step 6 — compute only Li and O references with 4 MPI processes
+python main.py --step 6 --elements Li O --nproc 4
+
+# Step 7 — use SCF energies with a tighter stability threshold
+python main.py --step 7 --energy-source scf --threshold 0.05
 ```
 
 ---
@@ -532,7 +542,10 @@ python scripts/04_dft.py [--stage scf|relax|all] [--nproc N] [--n-scf N] [--n-re
 # Step 5 — merge DFT results into candidates.ndjson
 python scripts/05_merge_dft_results.py [--dry-run]
 
-# Step 6 — hull stability analysis
+# Step 6 — elemental QE reference energies (must run before step 7)
+python scripts/elemental_references.py [--elements Li Fe P O] [--nproc N] [--dry-run]
+
+# Step 7 — hull stability analysis
 python scripts/06_hull_analysis.py [--threshold 0.05] [--energy-source scf|relax]
 
 # Utility — download pseudopotentials
@@ -749,7 +762,63 @@ python scripts/05_merge_dft_results.py --dry-run
 
 ---
 
-### Step 6 — Hull Stability Analysis
+### Step 6 — Elemental QE Reference Energies
+
+**Environment:** `maccai` | **Script:** `scripts/elemental_references.py`
+
+Runs `pw.x` SCF calculations on each elemental reference phase (Li BCC, Fe BCC, P₄ molecule, O₂
+molecule) using the **same pseudopotentials and cutoffs** as your candidate calculations. The
+resulting energies per atom are automatically written back into `config.yaml` under
+`elemental_references.energies_eV_per_atom`.
+
+**Why this step is necessary:**
+
+QE and VASP (used by Materials Project) report absolute total energies on different scales because
+they use different pseudopotential implementations. This offset (~5–10 eV/atom) makes it impossible
+to directly compare QE energies to MP database values. The formation energy approach removes this
+offset:
+
+```
+ΔH_f(QE)    = E_QE(candidate) − Σ n_i × E_QE(element_i)
+E_vasp_equiv = ΔH_f(QE) + Σ n_i × E_MP(element_i)
+```
+
+Step 7 (hull analysis) reads these reference energies from `config.yaml` automatically.
+
+**Relevant config keys (populated automatically after step 6):**
+
+```yaml
+elemental_references:
+  energies_eV_per_atom:
+    Li: null   # filled in by step 6
+    Fe: null   # filled in by step 6
+    P:  null   # filled in by step 6
+    O:  null   # filled in by step 6
+```
+
+**Output:** `output/dft/references/{Li,Fe,P,O}/qe.out` — one QE output file per element.
+
+```shell
+# Compute all four reference energies
+python scripts/elemental_references.py
+
+# Use 4 MPI processes per element calculation
+python scripts/elemental_references.py --nproc 4
+
+# Compute only Li and O (if Fe and P were already done)
+python scripts/elemental_references.py --elements Li O
+
+# Preview the input files without running QE
+python scripts/elemental_references.py --dry-run
+```
+
+> **Note:** This step only needs to be run **once per machine/pseudopotential setup**. If you
+> change `ecutwfc`, `ecutrho`, or switch pseudopotential files, re-run this step to keep the
+> references consistent.
+
+---
+
+### Step 7 — Hull Stability Analysis
 
 **Environment:** `maccai` | **Script:** `scripts/06_hull_analysis.py`
 
@@ -772,7 +841,7 @@ hull:
 ```
 
 ```shell
-# Use default settings
+# Use default settings (elemental_references must be filled first — run step 6)
 python scripts/06_hull_analysis.py
 
 # Use SCF energies with a tighter stability criterion
@@ -781,6 +850,9 @@ python scripts/06_hull_analysis.py --energy-source scf --threshold 0.05
 
 > **Important:** `MP_API_KEY` must be set as an environment variable before running this step.
 > Get your free key at [materialsproject.org/api](https://materialsproject.org/api).
+>
+> Step 6 (elemental references) **must** be completed before step 7 — hull analysis will fail
+> with a clear error message if `elemental_references.energies_eV_per_atom` contains `null` values.
 
 ---
 
@@ -805,16 +877,22 @@ output/
 │   │   ├── scf_0/ {qe.in, qe.out, out/}
 │   │   ├── scf_1/ {qe.in, qe.out, out/}
 │   │   └── ...
-│   └── relax/
-│       ├── relax_0/ {qe.in, qe.out, out/}
-│       └── ...
+│   ├── relax/
+│   │   ├── relax_0/ {qe.in, qe.out, out/}
+│   │   └── ...
+│   └── references/
+│       ├── Li/ {qe.in, qe.out, tmp/}   # elemental reference calculations (step 6)
+│       ├── Fe/ {qe.in, qe.out, tmp/}
+│       ├── P/  {qe.in, qe.out, tmp/}
+│       └── O/  {qe.in, qe.out, tmp/}
 └── logs/
     ├── 01_generate.log
     ├── 02_relax.log
     ├── 03_sanity_check.log
     ├── 04_dft.log
     ├── 05_merge_dft_results.log
-    └── 06_hull_analysis.log
+    ├── 06_elemental_references.log
+    └── 07_hull_analysis.log
 ```
 
 ---
