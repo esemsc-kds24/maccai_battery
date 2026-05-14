@@ -153,6 +153,28 @@ pseudopotentials:
     O:  "O.pbe-n-kjpaw_psl.0.1.UPF"
 
 # -----------------------------------------------------------------------------
+# ELEMENTAL REFERENCE ENERGIES  (QE, eV/atom)
+# -----------------------------------------------------------------------------
+# Required for hull analysis.  Run QE SCF on each elemental phase using the
+# SAME pseudopotentials and settings as your main calculations, then fill in:
+#   energy_eV_per_atom = (QE total energy in eV) / n_atoms
+#
+# Reference structures to use:
+#   Li  — BCC (Im-3m), 1-atom cell,  a ≈ 3.51 Å
+#   Fe  — BCC (Im-3m), 1-atom cell,  a ≈ 2.87 Å  (spin-polarised, ~4 μB/atom)
+#   P   — simple cubic or gamma-P (P4 molecule: E_total / 4)
+#   O   — O2 molecule in a 15 Å box: E_total / 2  (per O atom)
+#
+# Once you have the QE energies, replace null with the value, e.g.:
+#   Li: -202.3541
+elemental_references:
+  energies_eV_per_atom:
+    Li: null   # TODO: run QE SCF on Li BCC, set to E_total/1
+    Fe: null   # TODO: run QE SCF on Fe BCC (spin-pol), set to E_total/1
+    P:  null   # TODO: run QE SCF on P reference, set to E_total/n_atoms
+    O:  null   # TODO: run QE SCF on O2 molecule, set to E_total/2
+
+# -----------------------------------------------------------------------------
 # HULL ANALYSIS
 # -----------------------------------------------------------------------------
 hull:
