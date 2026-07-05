@@ -219,11 +219,19 @@ def _find_scf_dirs(scf_root: Path) -> List[Tuple[int, Path]]:
 def _find_relax_dirs(relax_root: Path) -> List[Path]:
     """Find all relaxation run directories.
 
-    Returns all sub-directories of *relax_root*, sorted by name.
+    Returns all sub-directories of *relax_root*, sorted numerically by any
+    trailing integer in the directory name (falls back to lexicographic
+    order for names without one, e.g. ``relax_2`` sorts before ``relax_10``).
     """
+    import re
+
+    def _sort_key(d: Path):
+        m = re.search(r"(\d+)$", d.name)
+        return (0, int(m.group(1))) if m else (1, d.name)
+
     dirs = sorted(
         [d for d in relax_root.iterdir() if d.is_dir()],
-        key=lambda d: d.name,
+        key=_sort_key,
     )
     return dirs
 
@@ -287,22 +295,34 @@ def _match_scf_to_candidates(
 def _match_relax_to_candidates(
     relax_dirs: List[Path],
     db_records: List[Dict],
+    n_relax_select: int,
     logger,
 ) -> List[Tuple[str, Dict, Path]]:
-    """Match relaxation run directories to candidate IDs by filename.
+    """Match relaxation run directories to candidate IDs.
 
-    The Colab notebook names relax directories after the ML-relaxed EXTXYZ
-    file, e.g.::
+    Two naming conventions are supported:
 
-        generated_crystals_frame48_ml_relaxed_relax/
+    1. **Frame-based** (external / Colab-style runs) — directories named
+       after the ML-relaxed EXTXYZ file, e.g.::
 
-    We search candidates.ndjson for a record whose ``ml_relaxed`` path
-    contains ``frame48``.
+           generated_crystals_frame48_ml_relaxed_relax/
+
+       Matched against a record whose ``ml_relaxed`` path contains ``frame48``.
+
+    2. **Sequential index** (the local pipeline's own naming, produced by
+       :meth:`~maccai_battery.dft.workflow.DFTWorkflow.run_dft_relax`) — plain
+       ``relax_0``, ``relax_1``, ... directories. These are matched by
+       replicating the same selection the workflow used: the top
+       ``n_relax_select`` candidates ranked by ascending DFT SCF energy per
+       atom (see ``CandidateDatabase.top_n_by_dft_scf_energy``).
 
     Parameters
     ----------
     relax_dirs : list of Path
     db_records : list of dict
+    n_relax_select : int
+        Number of candidates selected for relaxation
+        (``dft_relax.n_candidates`` from config).
     logger
 
     Returns
@@ -311,7 +331,7 @@ def _match_relax_to_candidates(
     """
     import re
 
-    # Build a frame-index → candidate_id lookup
+    # Build a frame-index → candidate_id lookup (convention 1)
     frame_to_record: Dict[int, Dict] = {}
     for record in db_records:
         ml_path = record.get("structure_files", {}).get("ml_relaxed", "") or ""
@@ -319,25 +339,51 @@ def _match_relax_to_candidates(
         if m:
             frame_to_record[int(m.group(1))] = record
 
+    # Replicate the SCF-energy ranking used by DFTWorkflow.run_dft_relax
+    # when it selects candidates directly from the database (convention 2).
+    def _scf_energy(r: dict) -> float:
+        e = r.get("dft_jobs", {}).get("scf", {}).get("energy_eV_per_atom")
+        return e if e is not None else float("inf")
+
+    scf_ranked = sorted(db_records, key=_scf_energy)
+    top_by_scf = scf_ranked[:n_relax_select]
+
     matched: List[Tuple[str, Dict, Path]] = []
 
     for run_dir in relax_dirs:
-        # Extract frame index from the run directory name
+        record = None
+
+        # -- Try convention 1: frame-based naming --------------------------
         m = re.search(r"frame(\d+)_ml_relaxed", run_dir.name)
-        if not m:
-            logger.debug(
-                "Relax dir '%s' does not contain a frame index — skipping.", run_dir.name
-            )
-            continue
+        if m:
+            frame_idx = int(m.group(1))
+            record = frame_to_record.get(frame_idx)
+            if record is None:
+                logger.warning(
+                    "No candidate found for frame%d (relax dir: %s).",
+                    frame_idx, run_dir.name,
+                )
+                continue
+        else:
+            # -- Fall back to convention 2: sequential relax_N index -------
+            idx_m = re.search(r"(\d+)$", run_dir.name)
+            if not idx_m:
+                logger.debug(
+                    "Relax dir '%s' matches neither the frame-based nor the "
+                    "sequential-index naming convention — skipping.",
+                    run_dir.name,
+                )
+                continue
 
-        frame_idx = int(m.group(1))
-        record    = frame_to_record.get(frame_idx)
-
-        if record is None:
-            logger.warning(
-                "No candidate found for frame%d (relax dir: %s).", frame_idx, run_dir.name
-            )
-            continue
+            idx = int(idx_m.group(1))
+            if idx >= len(top_by_scf):
+                logger.warning(
+                    "Relax run index %d is out of range for top-%d SCF "
+                    "candidates — skipping.",
+                    idx, n_relax_select,
+                )
+                continue
+            record = top_by_scf[idx]
 
         result = _parse_run_dir(run_dir, "qe.out")
         if result is None:
@@ -346,8 +392,8 @@ def _match_relax_to_candidates(
 
         matched.append((record["id"], result, run_dir))
         logger.debug(
-            "Matched relax frame%d → candidate %s (%s)",
-            frame_idx, record["id"], record.get("formula", "?"),
+            "Matched relax dir '%s' → candidate %s (%s)",
+            run_dir.name, record["id"], record.get("formula", "?"),
         )
 
     return matched
@@ -581,7 +627,9 @@ def main() -> None:
             relax_dirs = _find_relax_dirs(relax_root)
             logger.info("Found %d relaxation run directories.", len(relax_dirs))
 
-            relax_matches = _match_relax_to_candidates(relax_dirs, db_records, logger)
+            relax_matches = _match_relax_to_candidates(
+                relax_dirs, db_records, cfg.dft_relax.n_candidates, logger
+            )
 
             for cid, result, run_dir in relax_matches:
                 if "error" in result:

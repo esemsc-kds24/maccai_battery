@@ -152,6 +152,26 @@ class HullConfig:
 
 
 @dataclass
+class HubbardUConfig:
+    """DFT+U (Hubbard) correction settings for a DFT stage.
+
+    Attributes
+    ----------
+    enabled : bool
+        Whether to apply the Hubbard U correction at all.
+    lda_plus_u_kind : int
+        QE ``lda_plus_u_kind`` value. ``0`` = Dudarev (rotationally invariant,
+        U_eff = U - J).
+    U : dict[str, float]
+        Per-element Hubbard U value in eV, e.g. ``{"Fe": 5.3}``.
+    """
+
+    enabled: bool             = False
+    lda_plus_u_kind: int      = 0
+    U: Dict[str, float]       = field(default_factory=dict)
+
+
+@dataclass
 class DFTScreeningConfig:
     n_candidates: int                        = 8
     nproc: int                               = 1
@@ -163,10 +183,13 @@ class DFTScreeningConfig:
     degauss: float                           = 0.03
     conv_thr: float                          = 1.0e-4
     mixing_beta: float                       = 0.3
+    mixing_mode: str                         = "plain"
+    nmix: int                                = 8
     spin_polarised: bool                     = True
     starting_magnetization: Dict[str, float] = field(
         default_factory=lambda: {"Li": 0.0, "Fe": 0.3, "P": 0.0, "O": 0.0}
     )
+    hubbard_u: HubbardUConfig                = field(default_factory=HubbardUConfig)
 
 
 @dataclass
@@ -180,10 +203,13 @@ class DFTRelaxConfig:
     nstep: int                               = 10
     conv_thr: float                          = 1.0e-5
     mixing_beta: float                       = 0.3
+    mixing_mode: str                         = "plain"
+    nmix: int                                = 8
     spin_polarised: bool                     = True
     starting_magnetization: Dict[str, float] = field(
         default_factory=lambda: {"Li": 0.0, "Fe": 0.4, "P": 0.0, "O": 0.0}
     )
+    hubbard_u: HubbardUConfig                = field(default_factory=HubbardUConfig)
 
 
 @dataclass
