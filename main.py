@@ -70,7 +70,7 @@ STEPS = {
     1: {
         "name": "generate",
         "label": "Crystal generation (MatterGen)",
-        "script": "scripts/0generate.py",
+        "script": "scripts/generate.py",
         "env_note": "Requires: conda activate mattergen",
     },
     2: {
